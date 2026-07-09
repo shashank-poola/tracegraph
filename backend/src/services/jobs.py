@@ -160,6 +160,20 @@ async def run_reason_job(full_name: str, pr_number: int, ctx: RepoContext | None
         graph_url = tree.graph.console_url if tree and tree.graph else None
         body = render_comment(pr, verdict, ctx, graph_url)
         url = await upsert_pr_comment(token, full_name, pr_number, body, MARK_BEGIN)
+        db.save_pr_review(
+            full_name,
+            pr_number,
+            head_sha=pr.head_sha,
+            pr_title=pr.title,
+            verdict=verdict.verdict,
+            risk=verdict.risk,
+            good_enough=verdict.good_enough,
+            summary=verdict.summary,
+            verdict_json=verdict.model_dump(),
+            comment_url=url,
+            comment_body=body,
+            user_id=ctx.user_id if ctx else "",
+        )
         logger.info("reason done %s#%d verdict=%s url=%s", full_name, pr_number, verdict.verdict, url)
     except Exception as exc:  # noqa: BLE001
         logger.exception("reason failed %s#%d: %s", full_name, pr_number, exc)

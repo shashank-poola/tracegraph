@@ -1,4 +1,4 @@
-"""SQLite persistence: jobs + the three knowledge-graph artifact layers.
+"""SQLite persistence: jobs + the three knowledge-graph artifact layers + PR reviews.
 
 Tables
 ------
@@ -6,6 +6,8 @@ jobs            — async job lifecycle (analyze / crawl / ingest)
 repo_trees      — code layer (AST RepoTree JSON), keyed by owner/repo
 crawl_results   — UI layer (CrawlResult JSON), keyed by owner/repo
 ingest_results  — requirements layer (IngestResult JSON), keyed by owner/repo
+pr_reviews      — blast-radius verdicts from /reason and webhooks
+users/sessions/oauth_* — backend GitHub OAuth
 
 The frontend may still cache for display; the backend is the source of truth
 for /reason and /graph/connect (no giant payloads on every request).
@@ -118,6 +120,26 @@ CREATE TABLE IF NOT EXISTS oauth_states (
     created_at  TEXT NOT NULL,
     expires_at  TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS pr_reviews (
+    user_id         TEXT NOT NULL DEFAULT '',
+    full_name       TEXT NOT NULL,
+    pr_number       INTEGER NOT NULL,
+    head_sha        TEXT NOT NULL DEFAULT '',
+    pr_title        TEXT NOT NULL DEFAULT '',
+    verdict         TEXT NOT NULL DEFAULT 'comment',
+    risk            TEXT NOT NULL DEFAULT 'low',
+    good_enough     INTEGER NOT NULL DEFAULT 0,
+    summary         TEXT NOT NULL DEFAULT '',
+    verdict_json    TEXT NOT NULL,
+    comment_url     TEXT,
+    comment_body    TEXT,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    PRIMARY KEY (user_id, full_name, pr_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pr_reviews_repo ON pr_reviews(full_name);
 """
 
 
@@ -339,6 +361,121 @@ def get_repo_context(full_name: str, *, user_id: str = "") -> dict[str, Any]:
         "crawl": get_crawl_result(full_name, user_id=user_id),
         "requirements": get_ingest_requirements(full_name, user_id=user_id),
     }
+
+
+# ---------------------------------------------------------------------------
+# PR reviews — blast-radius persistence
+# ---------------------------------------------------------------------------
+
+
+def save_pr_review(
+    full_name: str,
+    pr_number: int,
+    *,
+    head_sha: str = "",
+    pr_title: str = "",
+    verdict: str = "comment",
+    risk: str = "low",
+    good_enough: bool = False,
+    summary: str = "",
+    verdict_json: dict[str, Any],
+    comment_url: str | None = None,
+    comment_body: str | None = None,
+    user_id: str = "",
+) -> dict[str, Any]:
+    now = _now()
+    with _connect() as conn:
+        existing = conn.execute(
+            """
+            SELECT created_at FROM pr_reviews
+            WHERE user_id = ? AND full_name = ? AND pr_number = ?
+            """,
+            (user_id, full_name, pr_number),
+        ).fetchone()
+        created_at = existing["created_at"] if existing else now
+        conn.execute(
+            """
+            INSERT INTO pr_reviews (
+                user_id, full_name, pr_number, head_sha, pr_title,
+                verdict, risk, good_enough, summary, verdict_json,
+                comment_url, comment_body, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, full_name, pr_number) DO UPDATE SET
+                head_sha = excluded.head_sha,
+                pr_title = excluded.pr_title,
+                verdict = excluded.verdict,
+                risk = excluded.risk,
+                good_enough = excluded.good_enough,
+                summary = excluded.summary,
+                verdict_json = excluded.verdict_json,
+                comment_url = excluded.comment_url,
+                comment_body = excluded.comment_body,
+                updated_at = excluded.updated_at
+            """,
+            (
+                user_id,
+                full_name,
+                pr_number,
+                head_sha,
+                pr_title,
+                verdict,
+                risk,
+                int(good_enough),
+                summary,
+                json.dumps(verdict_json),
+                comment_url,
+                comment_body,
+                created_at,
+                now,
+            ),
+        )
+    return get_pr_review(full_name, pr_number, user_id=user_id)  # type: ignore[return-value]
+
+
+def get_pr_review(
+    full_name: str,
+    pr_number: int,
+    *,
+    user_id: str = "",
+) -> dict[str, Any] | None:
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM pr_reviews
+            WHERE user_id = ? AND full_name = ? AND pr_number = ?
+            """,
+            (user_id, full_name, pr_number),
+        ).fetchone()
+    if not row:
+        return None
+    data = dict(row)
+    data["good_enough"] = bool(data["good_enough"])
+    data["verdict_json"] = json.loads(data["verdict_json"])
+    return data
+
+
+def list_pr_reviews(
+    *,
+    full_name: str | None = None,
+    user_id: str = "",
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    query = "SELECT * FROM pr_reviews WHERE user_id = ?"
+    params: list[Any] = [user_id]
+    if full_name:
+        query += " AND full_name = ?"
+        params.append(full_name)
+    query += " ORDER BY updated_at DESC LIMIT ?"
+    params.append(limit)
+    with _connect() as conn:
+        rows = conn.execute(query, params).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        data = dict(row)
+        data["good_enough"] = bool(data["good_enough"])
+        data["verdict_json"] = json.loads(data["verdict_json"])
+        out.append(data)
+    return out
 
 
 # ---------------------------------------------------------------------------
