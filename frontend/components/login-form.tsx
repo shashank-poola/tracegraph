@@ -33,8 +33,8 @@ export function LoginForm() {
           Welcome back
         </h1>
         <p className="text-sm leading-6 text-muted">
-          Sign in with GitHub to analyze a repository and start building your
-          knowledge graph.
+          Sign in with GitHub, then install the TraceGraph app on your
+          repositories for PR reviews and webhooks.
         </p>
       </div>
 
@@ -52,8 +52,8 @@ export function LoginForm() {
       </a>
 
       <p className="max-w-sm text-center text-xs leading-5 text-muted">
-        By continuing, you allow TraceGraph to read your repositories and
-        pull requests to build the knowledge graph.
+        Step 1 of 2: sign in with GitHub. You&apos;ll install the TraceGraph app
+        on your repos right after.
       </p>
     </div>
   );

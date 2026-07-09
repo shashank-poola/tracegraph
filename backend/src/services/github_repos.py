@@ -155,6 +155,27 @@ async def commit_count(token: str, full_name: str, ref: str = "") -> int:
         return len(resp.json())
 
 
+def _shape_pull(pr: dict) -> dict:
+    return {
+        "number": pr["number"],
+        "title": pr["title"],
+        "state": "merged" if pr.get("merged_at") else pr.get("state", "open"),
+        "author": (pr.get("user") or {}).get("login", ""),
+        "html_url": pr.get("html_url", ""),
+        "created_at": pr.get("created_at", ""),
+        "updated_at": pr.get("updated_at", ""),
+        "head_sha": (pr.get("head") or {}).get("sha", ""),
+        "base_ref": (pr.get("base") or {}).get("ref", ""),
+        "head_ref": (pr.get("head") or {}).get("ref", ""),
+        "commits": pr.get("commits", 0),
+        "changed_files": pr.get("changed_files", 0),
+        "additions": pr.get("additions", 0),
+        "deletions": pr.get("deletions", 0),
+        "comments": pr.get("comments", 0),
+        "review_comments": pr.get("review_comments", 0),
+    }
+
+
 async def list_pull_requests(token: str, full_name: str, *, state: str = "all") -> list[dict]:
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(
@@ -164,16 +185,15 @@ async def list_pull_requests(token: str, full_name: str, *, state: str = "all") 
         )
         if resp.status_code != 200:
             raise RuntimeError(f"PR list failed ({resp.status_code}) for {full_name}")
-        return [
-            {
-                "number": pr["number"],
-                "title": pr["title"],
-                "state": "merged" if pr.get("merged_at") else pr.get("state", "open"),
-                "author": (pr.get("user") or {}).get("login", ""),
-                "html_url": pr.get("html_url", ""),
-                "created_at": pr.get("created_at", ""),
-                "updated_at": pr.get("updated_at", ""),
-                "head_sha": (pr.get("head") or {}).get("sha", ""),
-            }
-            for pr in resp.json()
-        ]
+        return [_shape_pull(pr) for pr in resp.json()]
+
+
+async def get_pull_request(token: str, full_name: str, number: int) -> dict:
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(
+            f"{GH_API}/repos/{full_name}/pulls/{number}",
+            headers=_headers(token),
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"PR fetch failed ({resp.status_code}) for {full_name}#{number}")
+        return _shape_pull(resp.json())

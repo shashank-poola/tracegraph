@@ -9,8 +9,9 @@ export const metadata: Metadata = {
   description:
     "TraceGraph crawls your app, ingests your PRD, and builds a knowledge graph across requirements, UI, and code — so you know exactly what a PR breaks.",
   icons: {
-    icon: "/tglogo.jpg",
-    apple: "/tglogo.jpg",
+    icon: [{ url: "/tglogo.jpg", type: "image/jpeg" }],
+    apple: [{ url: "/tglogo.jpg", type: "image/jpeg" }],
+    shortcut: "/tglogo.jpg",
   },
 };
 

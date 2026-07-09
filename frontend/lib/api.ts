@@ -52,7 +52,51 @@ export type PullRequest = {
   created_at: string;
   updated_at: string;
   head_sha: string;
+  base_ref?: string;
+  head_ref?: string;
+  commits?: number;
+  changed_files?: number;
+  additions?: number;
+  deletions?: number;
+  comments?: number;
+  review_comments?: number;
   review: PullRequestReview | null;
+};
+
+export type RepoTree = {
+  full_name: string;
+  ref?: string;
+  summary?: string;
+  file_count?: number;
+  python_file_count?: number;
+  files: {
+    path: string;
+    language?: string;
+    parsed?: boolean;
+    functions: { name: string }[];
+    classes: { name: string }[];
+  }[];
+  graph?: {
+    console_url: string;
+    nodes_written: number;
+    relationships_written: number;
+    queries: { name: string; cypher: string }[];
+  } | null;
+};
+
+export type IngestResult = {
+  source: string;
+  source_type?: string;
+  requirement_count: number;
+  requirements: {
+    req_id: string;
+    title: string;
+    description?: string;
+    priority?: string;
+  }[];
+  overview?: string;
+  excerpt?: string;
+  files?: string[];
 };
 
 export type JobState = "pending" | "running" | "done" | "error";
@@ -84,6 +128,29 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function githubLoginUrl(): string {
   return `${API_URL}/auth/github/login`;
+}
+
+export function githubInstallUrl(): string {
+  return `${API_URL}/auth/github/install`;
+}
+
+export type InstallationStatus = {
+  required: boolean;
+  installed: boolean;
+};
+
+export async function getInstallationStatus(
+  installationId?: number,
+): Promise<InstallationStatus> {
+  const qs =
+    installationId != null ? `?installation_id=${installationId}` : "";
+  return api<InstallationStatus>(`/auth/github/installation-status${qs}`);
+}
+
+export async function getRepoAppInstalled(
+  fullName: string,
+): Promise<{ installed: boolean; required: boolean }> {
+  return api(`/repos/${fullName}/app-installed`);
 }
 
 export async function getCurrentUser(): Promise<CurrentUser | null> {
@@ -143,6 +210,21 @@ export function listRepoPulls(
   fullName: string,
 ): Promise<{ pulls: PullRequest[] }> {
   return api(`/repos/${fullName}/pulls`);
+}
+
+export function getRepoTree(fullName: string): Promise<RepoTree> {
+  return api(`/repos/${fullName}/tree`);
+}
+
+export function getRepoIngest(fullName: string): Promise<IngestResult> {
+  return api(`/repos/${fullName}/ingest`);
+}
+
+export function getRepoPull(
+  fullName: string,
+  number: number,
+): Promise<PullRequest> {
+  return api(`/repos/${fullName}/pulls/${number}`);
 }
 
 export function startAnalyze(params: {

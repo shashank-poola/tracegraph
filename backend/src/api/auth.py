@@ -10,6 +10,7 @@ from fastapi.responses import RedirectResponse
 from src.config import get_settings
 from src.core.deps import get_current_user
 from src.services import auth as auth_service
+from src.services import github_app
 
 logger = logging.getLogger("auth_routes")
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -39,6 +40,26 @@ async def github_callback(code: str = "", state: str = "", error: str = "") -> R
     redirect = RedirectResponse(f"{settings.frontend_origin}/auth/callback", status_code=302)
     auth_service.set_session_cookie(redirect, result["session_token"])
     return redirect
+
+
+@router.get("/github/install")
+async def github_install(_user: dict = Depends(get_current_user)) -> RedirectResponse:
+    try:
+        return RedirectResponse(await github_app.install_page_url(), status_code=302)
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@router.get("/github/installation-status")
+async def installation_status(
+    installation_id: int | None = None,
+    user: dict = Depends(get_current_user),
+) -> dict:
+    return await github_app.installation_status_for_user(
+        user.get("access_token", ""),
+        user_login=user.get("login", ""),
+        installation_id=installation_id,
+    )
 
 
 @router.get("/me")

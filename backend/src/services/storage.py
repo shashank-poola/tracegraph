@@ -147,6 +147,18 @@ CREATE TABLE IF NOT EXISTS tracked_repos (
     created_at  TEXT NOT NULL,
     PRIMARY KEY (user_id, full_name)
 );
+
+CREATE TABLE IF NOT EXISTS github_installations (
+    installation_id INTEGER PRIMARY KEY,
+    account_login   TEXT NOT NULL DEFAULT '',
+    account_type    TEXT NOT NULL DEFAULT '',
+    user_id         TEXT,
+    installed_at    TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_github_installations_login
+    ON github_installations(account_login);
 """
 
 
@@ -643,3 +655,67 @@ def pop_oauth_state(state: str) -> bool:
             return False
         conn.execute("DELETE FROM oauth_states WHERE state = ?", (state,))
         return True
+
+
+def get_user_by_login(login: str) -> dict[str, Any] | None:
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM users WHERE login = ?", (login,)).fetchone()
+    return dict(row) if row else None
+
+
+def save_github_installation(
+    *,
+    installation_id: int,
+    account_login: str = "",
+    account_type: str = "",
+    user_id: str = "",
+) -> None:
+    now = _now()
+    if not user_id and account_login:
+        user = get_user_by_login(account_login)
+        user_id = user["id"] if user else ""
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO github_installations (
+                installation_id, account_login, account_type, user_id, installed_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(installation_id) DO UPDATE SET
+                account_login = excluded.account_login,
+                account_type = excluded.account_type,
+                user_id = CASE
+                    WHEN excluded.user_id != '' THEN excluded.user_id
+                    ELSE github_installations.user_id
+                END,
+                updated_at = excluded.updated_at
+            """,
+            (installation_id, account_login, account_type, user_id, now, now),
+        )
+
+
+def delete_github_installation(installation_id: int) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "DELETE FROM github_installations WHERE installation_id = ?",
+            (installation_id,),
+        )
+
+
+def has_github_installation_for_app(_app_id: int) -> bool:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT installation_id FROM github_installations LIMIT 1"
+        ).fetchone()
+    return row is not None
+
+
+def has_github_installation_for_login(login: str) -> bool:
+    if not login:
+        return False
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT installation_id FROM github_installations WHERE lower(account_login) = lower(?)",
+            (login,),
+        ).fetchone()
+    return row is not None

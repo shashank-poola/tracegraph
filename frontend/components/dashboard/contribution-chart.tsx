@@ -19,28 +19,33 @@ export function ContributionChart({
   total: number;
   days: Day[];
 }) {
-  const recent = days.slice(-91);
   const weeks: Day[][] = [];
-  for (let i = 0; i < recent.length; i += 7) {
-    weeks.push(recent.slice(i, i + 7));
+  for (let i = 0; i < days.length; i += 7) {
+    weeks.push(days.slice(i, i + 7));
   }
 
   return (
-    <div className="flex flex-col gap-2 border-t border-border pt-4">
+    <div className="flex w-full flex-col gap-2 border-t border-border pt-4">
       <div className="flex items-baseline justify-between">
         <span className="text-xs text-muted">Contributions</span>
         <span className="font-heading text-sm text-foreground">
           {total.toLocaleString()}
         </span>
       </div>
-      <div className="flex gap-[3px] overflow-hidden">
+      <div
+        className="grid w-full gap-[2px]"
+        style={{ gridTemplateColumns: `repeat(${weeks.length}, minmax(0, 1fr))` }}
+      >
         {weeks.map((week, wi) => (
-          <div key={wi} className="flex flex-col gap-[3px]">
+          <div key={wi} className="flex min-w-0 flex-col gap-[2px]">
             {week.map((day) => (
               <div
                 key={day.date}
                 title={`${day.count} on ${day.date}`}
-                className={cn("h-[9px] w-[9px] rounded-[2px]", level(day.count))}
+                className={cn(
+                  "aspect-square w-full rounded-[2px]",
+                  level(day.count),
+                )}
               />
             ))}
           </div>

@@ -25,6 +25,7 @@ from src.models.schemas import (
 )
 from src.services.graph import build_knowledge_graph
 from src.services.graph_layers import connect_layers
+from src.services.github_app import record_installation_webhook
 from src.services.jobs import (
     create_analyze_job,
     create_crawl_job,
@@ -146,9 +147,12 @@ async def github_webhook(request: Request) -> dict[str, str]:
     event = request.headers.get("X-GitHub-Event", "")
     if event == "ping":
         return {"status": "pong"}
+    payload = json.loads(raw)
+    if event == "installation":
+        record_installation_webhook(payload.get("installation") or {}, action=payload.get("action", ""))
+        return {"status": "ok", "event": event, "action": payload.get("action", "")}
     if event != "pull_request":
         return {"status": "ignored", "event": event}
-    payload = json.loads(raw)
     action = payload.get("action", "")
     if action not in {"opened", "reopened", "synchronize", "ready_for_review"}:
         return {"status": "ignored", "action": action}

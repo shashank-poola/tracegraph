@@ -56,8 +56,9 @@ class Settings(BaseSettings):
     # SQLite artifact store
     sqlite_path: str = "data/tracegraph.db"
 
-    # GitHub App (webhook + PR comment write-back)
+    # GitHub App (webhook + PR comment write-back + install onboarding)
     github_app_id: str = ""
+    github_app_slug: str = ""
     github_app_private_key_path: str = ""
     github_app_private_key: str = Field(default="", repr=False)
     github_webhook_secret: str = Field(default="", repr=False)

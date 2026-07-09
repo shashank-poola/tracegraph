@@ -1,4 +1,4 @@
-"""GitHub App auth + PR fetch + comment write-back."""
+"""GitHub App auth + install checks + PR fetch + comment write-back."""
 
 from __future__ import annotations
 
@@ -6,15 +6,210 @@ import logging
 import re
 import time
 from functools import lru_cache
+from typing import Any
 
 import httpx
 import jwt
 
 from src.config import get_settings
+from src.services import storage as db
 
 logger = logging.getLogger("github_app")
 GH_API = "https://api.github.com"
 MARKER_RE = re.compile(r"#(\d+)")
+
+
+def _app_credentials_configured() -> bool:
+    s = get_settings()
+    if not s.github_app_id:
+        return False
+    if s.github_app_private_key:
+        return True
+    path = (s.github_app_private_key_path or "").strip()
+    return bool(path)
+
+
+def app_install_configured() -> bool:
+    return _app_credentials_configured()
+
+
+_resolved_slug: str | None = None
+
+
+async def resolve_app_slug() -> str:
+    global _resolved_slug
+    s = get_settings()
+    if s.github_app_slug:
+        return s.github_app_slug
+    if _resolved_slug:
+        return _resolved_slug
+    if not _app_credentials_configured():
+        raise RuntimeError("GitHub App not configured (GITHUB_APP_ID + private key)")
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(f"{GH_API}/app", headers=_app_headers())
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"failed to resolve app slug from GitHub ({resp.status_code}). "
+            "Set GITHUB_APP_SLUG in backend/.env"
+        )
+    data = resp.json()
+    slug = data.get("slug") or ""
+    if not slug:
+        html_url = data.get("html_url", "")
+        slug = html_url.rstrip("/").split("/")[-1] if html_url else ""
+    if not slug:
+        raise RuntimeError("could not resolve app slug — set GITHUB_APP_SLUG in backend/.env")
+    _resolved_slug = slug
+    return slug
+
+
+async def install_page_url() -> str:
+    slug = await resolve_app_slug()
+    return f"https://github.com/apps/{slug}/installations/new"
+
+
+async def user_has_app_installed(access_token: str, *, user_login: str = "") -> bool:
+    s = get_settings()
+    if not s.github_app_id:
+        return True
+
+    if user_login and db.has_github_installation_for_login(user_login):
+        return True
+
+    if user_login and await _installation_exists_for_login(user_login):
+        return True
+
+    if not access_token:
+        return False
+
+    target = int(s.github_app_id)
+    async with httpx.AsyncClient(timeout=30) as client:
+        page = 1
+        while True:
+            resp = await client.get(
+                f"{GH_API}/user/installations",
+                headers=_token_headers(access_token),
+                params={"per_page": 100, "page": page},
+            )
+            if resp.status_code != 200:
+                logger.warning("user installations fetch failed (%s)", resp.status_code)
+                return bool(user_login and db.has_github_installation_for_login(user_login))
+            batch = resp.json().get("installations", [])
+            for inst in batch:
+                if inst.get("app_id") == target:
+                    db.save_github_installation(
+                        installation_id=int(inst["id"]),
+                        account_login=(inst.get("account") or {}).get("login", ""),
+                        account_type=(inst.get("account") or {}).get("type", ""),
+                    )
+                    return True
+            if len(batch) < 100:
+                break
+            page += 1
+    return bool(user_login and db.has_github_installation_for_login(user_login))
+
+
+async def _installation_exists_for_login(user_login: str) -> bool:
+    login = user_login.lower()
+    async with httpx.AsyncClient(timeout=30) as client:
+        page = 1
+        while True:
+            resp = await client.get(
+                f"{GH_API}/app/installations",
+                headers=_app_headers(),
+                params={"per_page": 100, "page": page},
+            )
+            if resp.status_code != 200:
+                logger.warning("app installations list failed (%s)", resp.status_code)
+                return False
+            batch = resp.json()
+            if not isinstance(batch, list):
+                batch = []
+            for inst in batch:
+                account = inst.get("account") or {}
+                if (account.get("login") or "").lower() == login:
+                    user = db.get_user_by_login(user_login)
+                    db.save_github_installation(
+                        installation_id=int(inst["id"]),
+                        account_login=account.get("login", ""),
+                        account_type=account.get("type", ""),
+                        user_id=user["id"] if user else "",
+                    )
+                    return True
+            link = resp.headers.get("Link", "")
+            if 'rel="next"' not in link:
+                break
+            page += 1
+    return False
+
+
+async def confirm_user_installation(
+    user_login: str,
+    installation_id: int | None,
+    *,
+    access_token: str = "",
+) -> bool:
+    if installation_id:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                f"{GH_API}/app/installations/{installation_id}",
+                headers=_app_headers(),
+            )
+            if resp.status_code == 200:
+                inst = resp.json()
+                account = inst.get("account") or {}
+                if (account.get("login") or "").lower() == user_login.lower():
+                    user = db.get_user_by_login(user_login)
+                    db.save_github_installation(
+                        installation_id=int(inst["id"]),
+                        account_login=account.get("login", ""),
+                        account_type=account.get("type", ""),
+                        user_id=user["id"] if user else "",
+                    )
+                    return True
+    return await user_has_app_installed(access_token, user_login=user_login)
+
+
+async def installation_status_for_user(
+    access_token: str,
+    *,
+    user_login: str = "",
+    installation_id: int | None = None,
+) -> dict[str, Any]:
+    if not app_install_configured():
+        return {"required": False, "installed": True}
+    if installation_id and user_login:
+        await confirm_user_installation(user_login, installation_id, access_token=access_token)
+    installed = await user_has_app_installed(access_token, user_login=user_login)
+    return {"required": True, "installed": installed}
+
+
+async def repo_has_app_installed(full_name: str) -> bool:
+    if not app_install_configured():
+        return True
+    owner, repo = full_name.split("/", 1)
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(
+            f"{GH_API}/repos/{owner}/{repo}/installation",
+            headers=_app_headers(),
+        )
+        return resp.status_code == 200
+
+
+def record_installation_webhook(installation: dict, *, action: str) -> None:
+    installation_id = installation.get("id")
+    if not installation_id:
+        return
+    account = installation.get("account") or {}
+    if action == "deleted":
+        db.delete_github_installation(int(installation_id))
+        return
+    if action in {"created", "added", "new_permissions_accepted"}:
+        db.save_github_installation(
+            installation_id=int(installation_id),
+            account_login=account.get("login", ""),
+            account_type=account.get("type", ""),
+        )
 
 
 @lru_cache

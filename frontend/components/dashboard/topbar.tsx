@@ -23,9 +23,9 @@ export function Topbar({ user }: { user: CurrentUser }) {
           <Image
             src="/logo.png"
             alt="TraceGraph"
-            width={130}
-            height={43}
-            className="h-7 w-auto"
+            width={160}
+            height={50}
+            className="h-9 w-auto"
           />
         </Link>
 
