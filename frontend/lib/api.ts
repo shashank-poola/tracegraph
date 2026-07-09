@@ -113,6 +113,10 @@ export type GithubProfile = {
   followers: number;
   following: number;
   tracked_count: number;
+  contributions?: {
+    total: number;
+    days: { date: string; count: number }[];
+  };
 };
 
 export function getProfile(): Promise<GithubProfile> {

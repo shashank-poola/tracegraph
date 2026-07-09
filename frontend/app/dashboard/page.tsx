@@ -7,6 +7,7 @@ import { useCurrentUser } from "@/hooks/use-current-user";
 import { Topbar } from "@/components/dashboard/topbar";
 import { ProfileCard } from "@/components/dashboard/profile-card";
 import { RepoCard } from "@/components/dashboard/repo-card";
+import { CONTAINER } from "@/lib/layout";
 import {
   type GithubProfile,
   type Repo,
@@ -97,7 +98,7 @@ export default function DashboardPage() {
     <div className="flex min-h-screen flex-col">
       <Topbar user={user} />
 
-      <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-8 px-6 py-10 md:flex-row">
+      <main className={`${CONTAINER} flex flex-1 flex-col gap-8 py-10 md:flex-row`}>
         <aside className="w-full shrink-0 md:w-72">
           {profile ? (
             <ProfileCard profile={profile} />

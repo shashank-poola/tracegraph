@@ -5,6 +5,10 @@
   --foreground: #fafafa;
   --muted: #a1a1aa;
   --border: #27272a;
+  --accent-violet: #8b5cf6;
+  --accent-cyan: #22d3ee;
+  --accent-emerald: #34d399;
+  --accent-amber: #fbbf24;
 }
 
 @theme inline {
@@ -30,4 +34,66 @@ h2,
 h3 {
   font-family: var(--font-heading);
   letter-spacing: -0.01em;
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% center; }
+  100% { background-position: -200% center; }
+}
+
+@keyframes pulse-glow {
+  0%, 100% { opacity: 0.4; transform: scale(1); }
+  50% { opacity: 0.8; transform: scale(1.02); }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+
+@keyframes faq-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-shimmer {
+  background-size: 200% 100%;
+  animation: shimmer 2.5s linear infinite;
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+.animate-float {
+  animation: float 4s ease-in-out infinite;
+}
+
+.faq-fade-in {
+  opacity: 0;
+  animation: faq-fade-in 0.55s ease-out forwards;
+}
+
+.progress-gradient {
+  background: linear-gradient(
+    90deg,
+    var(--accent-violet),
+    var(--accent-cyan),
+    var(--accent-emerald)
+  );
+}
+
+.progress-gradient-ingest {
+  background: linear-gradient(
+    90deg,
+    var(--accent-amber),
+    var(--accent-emerald),
+    var(--accent-cyan)
+  );
 }

@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { Database, ExternalLink, FileText, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { JobProgress } from "@/components/dashboard/job-progress";
+import { PipelineProgress } from "@/components/dashboard/pipeline-progress";
 import {
   type JobStatus,
   type RepoDetail,
@@ -108,7 +108,7 @@ export function AnalysisTools({
           <Sparkles className="h-3.5 w-3.5" />
           {repo.status.has_graph ? "Regenerate knowledge graph" : "Generate knowledge graph"}
         </Button>
-        {graphJob && <JobProgress status={graphJob} />}
+        {graphJob && <PipelineProgress status={graphJob} kind="graph" />}
         {graphUrl && (
           <a
             href={graphUrl}
@@ -140,7 +140,7 @@ export function AnalysisTools({
         >
           Ingest codebase docs
         </Button>
-        {ingestJob && <JobProgress status={ingestJob} />}
+        {ingestJob && <PipelineProgress status={ingestJob} kind="ingest" />}
         {reqCount !== null && (
           <p className="text-xs text-muted">
             Extracted <span className="text-foreground">{reqCount}</span>{" "}

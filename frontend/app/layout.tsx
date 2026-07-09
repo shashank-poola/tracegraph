@@ -2,11 +2,15 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "TraceGraph — Knowledge graph for blast radius",
+  title: {
+    default: "TraceGraph",
+    template: "%s · TraceGraph",
+  },
   description:
     "TraceGraph crawls your app, ingests your PRD, and builds a knowledge graph across requirements, UI, and code — so you know exactly what a PR breaks.",
   icons: {
-    icon: "/favicon.ico",
+    icon: "/tglogo.jpg",
+    apple: "/tglogo.jpg",
   },
 };
 

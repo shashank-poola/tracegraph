@@ -1,11 +1,12 @@
 import Link from "next/link";
 import Image from "next/image";
 import { Button } from "@/components/ui/button";
+import { CONTAINER } from "@/lib/layout";
 
 export function Navbar() {
   return (
-    <header className="sticky top-0 z-50 border-b border-border/60 bg-background/80 backdrop-blur">
-      <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6">
+    <header className="sticky top-0 z-50 bg-background/80 backdrop-blur">
+      <div className={`${CONTAINER} flex h-16 items-center justify-between`}>
         <Link href="/" className="flex items-center">
           <Image
             src="/logo.png"
@@ -24,13 +25,8 @@ export function Navbar() {
           <a href="#how" className="transition-colors hover:text-foreground">
             How it works
           </a>
-          <a
-            href="https://github.com"
-            target="_blank"
-            rel="noreferrer"
-            className="transition-colors hover:text-foreground"
-          >
-            GitHub
+          <a href="#faq" className="transition-colors hover:text-foreground">
+            FAQ
           </a>
         </nav>
 

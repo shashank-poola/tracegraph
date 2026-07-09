@@ -39,15 +39,68 @@ def _shape_repo(r: dict) -> dict:
     }
 
 
+_CONTRIB_QUERY = """
+query($login: String!) {
+  user(login: $login) {
+    contributionsCollection {
+      contributionCalendar {
+        totalContributions
+        weeks {
+          contributionDays {
+            contributionCount
+            date
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+async def get_contribution_calendar(token: str, login: str) -> dict:
+    """Last ~52 weeks of contribution days for the profile heatmap."""
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            f"{GH_API}/graphql",
+            headers=_headers(token),
+            json={"query": _CONTRIB_QUERY, "variables": {"login": login}},
+        )
+        if resp.status_code != 200:
+            return {"total": 0, "days": []}
+        data = resp.json()
+        cal = (
+            (data.get("data") or {})
+            .get("user", {})
+            .get("contributionsCollection", {})
+            .get("contributionCalendar", {})
+        )
+        days: list[dict] = []
+        for week in cal.get("weeks") or []:
+            for day in week.get("contributionDays") or []:
+                days.append(
+                    {
+                        "date": day.get("date", ""),
+                        "count": day.get("contributionCount", 0),
+                    }
+                )
+        return {
+            "total": cal.get("totalContributions", 0),
+            "days": days[-371:],  # ~53 weeks max grid width
+        }
+
+
 async def get_authenticated_profile(token: str) -> dict:
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(f"{GH_API}/user", headers=_headers(token))
         if resp.status_code != 200:
             raise RuntimeError(f"profile fetch failed ({resp.status_code})")
         u = resp.json()
+        login = u.get("login", "")
+        contributions = await get_contribution_calendar(token, login)
         return {
-            "login": u.get("login", ""),
-            "name": u.get("name") or u.get("login", ""),
+            "login": login,
+            "name": u.get("name") or login,
             "avatar_url": u.get("avatar_url", ""),
             "bio": u.get("bio") or "",
             "location": u.get("location") or "",
@@ -55,6 +108,7 @@ async def get_authenticated_profile(token: str) -> dict:
             "public_repos": u.get("public_repos", 0),
             "followers": u.get("followers", 0),
             "following": u.get("following", 0),
+            "contributions": contributions,
         }
 
 

@@ -4,7 +4,7 @@ import { Suspense } from "react";
 import { LoginForm } from "@/components/login-form";
 
 export const metadata: Metadata = {
-  title: "Sign in — TraceGraph",
+  title: "Sign in",
 };
 
 export default function LoginPage() {

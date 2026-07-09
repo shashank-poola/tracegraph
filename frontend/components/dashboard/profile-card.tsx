@@ -1,11 +1,14 @@
 import Image from "next/image";
 import { MapPin } from "lucide-react";
+import { ContributionChart } from "@/components/dashboard/contribution-chart";
 import type { GithubProfile } from "@/lib/api";
 
 function Stat({ label, value }: { label: string; value: number }) {
   return (
     <div className="flex flex-col">
-      <span className="font-heading text-lg text-foreground">{value}</span>
+      <span className="font-heading text-lg text-foreground">
+        {value.toLocaleString()}
+      </span>
       <span className="text-xs text-muted">{label}</span>
     </div>
   );
@@ -22,9 +25,7 @@ export function ProfileCard({ profile }: { profile: GithubProfile }) {
         className="h-16 w-16 rounded-full border border-border"
       />
       <div className="flex flex-col gap-1">
-        <h2 className="font-heading text-lg text-foreground">
-          {profile.name}
-        </h2>
+        <h2 className="font-heading text-lg text-foreground">{profile.name}</h2>
         <a
           href={profile.html_url}
           target="_blank"
@@ -46,7 +47,14 @@ export function ProfileCard({ profile }: { profile: GithubProfile }) {
         </div>
       )}
 
-      <div className="mt-2 grid grid-cols-3 gap-4 border-t border-border pt-4">
+      {profile.contributions && profile.contributions.days.length > 0 && (
+        <ContributionChart
+          total={profile.contributions.total}
+          days={profile.contributions.days}
+        />
+      )}
+
+      <div className="grid grid-cols-3 gap-4 border-t border-border pt-4">
         <Stat label="Repos" value={profile.public_repos} />
         <Stat label="Followers" value={profile.followers} />
         <Stat label="Tracked" value={profile.tracked_count} />

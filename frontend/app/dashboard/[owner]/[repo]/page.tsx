@@ -8,6 +8,7 @@ import { RepoHeader } from "@/components/dashboard/repo-header";
 import { AnalysisTools } from "@/components/dashboard/analysis-tools";
 import { LiveCrawl } from "@/components/dashboard/live-crawl";
 import { PullRequestsPanel } from "@/components/dashboard/pull-requests-panel";
+import { CONTAINER } from "@/lib/layout";
 import { type RepoDetail, getRepoDetail } from "@/lib/api";
 
 export default function RepoDetailPage({
@@ -51,7 +52,7 @@ export default function RepoDetailPage({
     <div className="flex min-h-screen flex-col">
       <Topbar user={user} />
 
-      <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-10 px-6 py-10">
+      <main className={`${CONTAINER} flex flex-1 flex-col gap-10 py-10`}>
         {error && (
           <p className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-400">
             {error}

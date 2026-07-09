@@ -4,7 +4,7 @@ import { useState } from "react";
 import { Compass, Lock, Plus, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { JobProgress } from "@/components/dashboard/job-progress";
+import { PipelineProgress } from "@/components/dashboard/pipeline-progress";
 import { type JobStatus, pollJob, startCrawl } from "@/lib/api";
 
 type Route = { path: string; authenticated: boolean };
@@ -135,7 +135,7 @@ export function LiveCrawl({
             {routes.filter((r) => r.path.trim()).length === 1 ? "" : "s"}
           </Button>
 
-          {job && <JobProgress status={job} />}
+          {job && <PipelineProgress status={job} kind="crawl" />}
         </div>
 
         <div className="rounded-lg border border-border p-4">
