@@ -22,9 +22,12 @@ def _private_key() -> str:
     s = get_settings()
     if s.github_app_private_key:
         return s.github_app_private_key
-    if not s.github_app_private_key_path:
+    path = s.github_app_private_key_path
+    if not path:
         raise RuntimeError("GitHub App private key not configured")
-    with open(s.github_app_private_key_path, encoding="utf-8") as fh:
+    if path.strip().startswith("-----BEGIN"):
+        return path
+    with open(path, encoding="utf-8") as fh:
         return fh.read()
 
 

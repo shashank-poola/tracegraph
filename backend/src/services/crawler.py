@@ -1,4 +1,4 @@
-"""Playwright crawl — route-based, deterministic DOM + screenshot capture."""
+"""Hybrid crawl: browser-use agent discovers screens, Playwright captures artifacts."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from src.models.schemas import (
     ScreenInfo,
     Transition,
 )
+from src.services.browser_agent import AgentCrawlPlan, AgentScreen, discover_screens
 from src.services.screenshot import store_screenshot
 
 logger = logging.getLogger("crawler")
@@ -37,13 +38,22 @@ def _resolve_url(base: str, path: str) -> str:
 
 
 def _screen_id(url: str) -> str:
-    p = urlparse(url)
-    return p.path or "/"
+    return urlparse(url).path or "/"
+
+
+def _parse_elements(html: str) -> list[InteractiveElement]:
+    out: list[InteractiveElement] = []
+    for tag, kind in (("button", "button"), ("a", "link"), ("input", "input")):
+        if f"<{tag}" in html:
+            out.append(InteractiveElement(kind=kind, role=kind))
+    return out[:50]
 
 
 async def _label_screen(screen: ScreenInfo, structured: list) -> None:
     s = get_settings()
-    if not s.crawl_llm_labeling or not (s.zai_api_key or s.groq_api_key or s.gemini_api_key):
+    if not s.crawl_llm_labeling or screen.label:
+        return
+    if not (s.zai_api_key or s.groq_api_key or s.gemini_api_key):
         return
     try:
         from src.core.json_util import extract_json
@@ -56,35 +66,47 @@ async def _label_screen(screen: ScreenInfo, structured: list) -> None:
             json_mode=True,
         )
         data = extract_json(raw)
-        screen.label = data.get("label", "")
-        screen.purpose = data.get("purpose", "")
-        screen.primary_actions = data.get("primary_actions") or []
+        screen.label = data.get("label", screen.label)
+        screen.purpose = data.get("purpose", screen.purpose)
+        screen.primary_actions = data.get("primary_actions") or screen.primary_actions
         screen.key_components = data.get("key_components") or []
     except Exception as exc:  # noqa: BLE001
-        logger.warning("screen label failed %s: %s", screen.url, exc)
+        logger.warning("label failed %s: %s", screen.url, exc)
 
 
-def _parse_elements(page_html: str) -> list[InteractiveElement]:
-    # Lightweight parse — full DOM kept separately; extract key controls only.
-    elements: list[InteractiveElement] = []
-    for tag, kind in (("button", "button"), ("a", "link"), ("input", "input")):
-        if f"<{tag}" in page_html:
-            elements.append(InteractiveElement(kind=kind, role=kind))
-    return elements[:50]
+def _targets_from_request(req: CrawlRequest, plan: AgentCrawlPlan | None) -> list[tuple[str, bool, AgentScreen | None]]:
+    """(url, authenticated, agent_metadata) list to capture."""
+    seen: set[str] = set()
+    targets: list[tuple[str, bool, AgentScreen | None]] = []
+
+    def add(url: str, auth: bool = False, meta: AgentScreen | None = None) -> None:
+        if url and url not in seen:
+            seen.add(url)
+            targets.append((url, auth, meta))
+
+    if plan:
+        for s in plan.screens:
+            add(s.url, s.authenticated, s)
+
+    for route in req.routes:
+        add(_resolve_url(req.base_url, route.path), route.authenticated)
+
+    if not targets:
+        add(req.base_url.rstrip("/") + "/" if not req.base_url.endswith("/") else req.base_url)
+
+    cap = get_settings().crawl_max_screens
+    return targets[:cap]
 
 
-async def crawl_app(req: CrawlRequest, progress: ProgressCb | None = None) -> CrawlResult:
+async def _playwright_capture(
+    req: CrawlRequest,
+    targets: list[tuple[str, bool, AgentScreen | None]],
+    artifact_dir: Path,
+    progress: ProgressCb | None,
+) -> list[ScreenInfo]:
     settings = get_settings()
-    run_id = uuid.uuid4().hex[:12]
-    artifact_dir = Path(settings.crawl_artifact_dir) / run_id
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-
-    routes: list[RouteSpec] = req.routes or [RouteSpec(path="/")]
-    if len(routes) > settings.crawl_max_screens:
-        routes = routes[: settings.crawl_max_screens]
-
     screens: list[ScreenInfo] = []
-    url_to_id: dict[str, str] = {}
+    total = len(targets)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=settings.crawl_headless)
@@ -100,36 +122,34 @@ async def crawl_app(req: CrawlRequest, progress: ProgressCb | None = None) -> Cr
             await page.click(lg.submit_selector)
             await page.wait_for_load_state("networkidle")
 
-        total = len(routes)
-        for i, route in enumerate(routes):
+        for i, (url, auth, meta) in enumerate(targets):
             if progress:
-                await progress(0.1 + 0.8 * (i / total), f"Crawling {route.path}")
-            url = _resolve_url(req.base_url, route.path)
+                await progress(0.2 + 0.7 * (i / max(total, 1)), f"Capturing {url}")
             sid = _screen_id(url)
-            await page.goto(url)
-            await page.wait_for_load_state("domcontentloaded")
+            try:
+                await page.goto(url)
+                await page.wait_for_load_state("domcontentloaded")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("goto failed %s: %s", url, exc)
+                continue
 
-            html = await page.content()
-            if len(html) > settings.crawl_max_dom_bytes:
-                html = html[: settings.crawl_max_dom_bytes]
-
+            html = (await page.content())[: settings.crawl_max_dom_bytes]
             shot = await page.screenshot(full_page=True)
-            shot_path = artifact_dir / f"{sid.replace('/', '_') or 'root'}.png"
+            safe = sid.replace("/", "_") or "root"
+            shot_path = artifact_dir / f"{safe}.png"
             shot_path.write_bytes(shot)
-
             a11y = await page.accessibility.snapshot() or {}
-            a11y_path = artifact_dir / f"{sid.replace('/', '_') or 'root'}.a11y.json"
+            a11y_path = artifact_dir / f"{safe}.a11y.json"
             a11y_path.write_text(json.dumps(a11y), encoding="utf-8")
-
-            dom_path = artifact_dir / f"{sid.replace('/', '_') or 'root'}.html"
+            dom_path = artifact_dir / f"{safe}.html"
             dom_path.write_text(html, encoding="utf-8")
 
             structured = [{"tag": "document", "url": url, "title": await page.title()}]
             screen = ScreenInfo(
                 screen_id=sid,
                 url=url,
-                title=await page.title(),
-                authenticated=route.authenticated,
+                title=meta.title if meta and meta.title else await page.title(),
+                authenticated=meta.authenticated if meta else auth,
                 interactive_count=len(_parse_elements(html)),
                 dom_path=str(dom_path),
                 screenshot_path=str(shot_path),
@@ -139,21 +159,89 @@ async def crawl_app(req: CrawlRequest, progress: ProgressCb | None = None) -> Cr
                 a11y=json.dumps(a11y),
                 elements=_parse_elements(html),
                 structured_dom=structured,
+                label=meta.label if meta else "",
+                purpose=meta.purpose if meta else "",
+                primary_actions=meta.primary_actions if meta else [],
             )
             await _label_screen(screen, structured)
             screens.append(screen)
-            url_to_id[url] = sid
 
         await browser.close()
+    return screens
 
-    transitions: list[Transition] = []
-    known = {_resolve_url(req.base_url, r.path) for r in routes}
-    for i, a in enumerate(screens):
-        for b in screens[i + 1 :]:
-            if b.url in known:
-                transitions.append(
-                    Transition(from_screen=a.screen_id, to_screen=b.screen_id, action="navigate")
-                )
+
+def _transitions(
+    req: CrawlRequest,
+    plan: AgentCrawlPlan | None,
+    screens: list[ScreenInfo],
+) -> list[Transition]:
+    url_to_sid = {s.url: s.screen_id for s in screens}
+    out: list[Transition] = []
+
+    if plan:
+        for t in plan.transitions:
+            src = url_to_sid.get(t.from_url)
+            dst = url_to_sid.get(t.to_url)
+            if src and dst:
+                out.append(Transition(from_screen=src, to_screen=dst, action=t.action))
+
+    # Fallback: sequential route order
+    if not out and len(screens) > 1:
+        for a, b in zip(screens, screens[1:]):
+            out.append(Transition(from_screen=a.screen_id, to_screen=b.screen_id, action="navigate"))
+    return out
+
+
+async def _agent_only_result(req: CrawlRequest, plan: AgentCrawlPlan, run_id: str) -> CrawlResult:
+    """When Playwright pass skipped — map agent output directly to ScreenInfo."""
+    screens = [
+        ScreenInfo(
+            screen_id=_screen_id(s.url),
+            url=s.url,
+            title=s.title,
+            label=s.label,
+            purpose=s.purpose,
+            authenticated=s.authenticated,
+            primary_actions=s.primary_actions,
+            structured_dom=[{"url": s.url, "title": s.title}],
+        )
+        for s in plan.screens[: get_settings().crawl_max_screens]
+    ]
+    transitions = _transitions(req, plan, screens)
+    return CrawlResult(
+        run_id=run_id,
+        base_url=req.base_url,
+        screen_count=len(screens),
+        screens=screens,
+        transitions=transitions,
+    )
+
+
+async def crawl_app(req: CrawlRequest, progress: ProgressCb | None = None) -> CrawlResult:
+    settings = get_settings()
+    run_id = uuid.uuid4().hex[:12]
+    artifact_dir = Path(settings.crawl_artifact_dir) / run_id
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    mode = (req.crawl_mode or "hybrid").lower()
+    plan: AgentCrawlPlan | None = None
+
+    if mode in {"hybrid", "agent"}:
+        if progress:
+            await progress(0.05, "Agent exploring application")
+        plan = await discover_screens(req)
+
+    if mode == "agent" and plan:
+        if progress:
+            await progress(1.0, "Agent crawl complete")
+        result = await _agent_only_result(req, plan, run_id)
+        result.artifact_dir = str(artifact_dir)
+        return result
+
+    targets = _targets_from_request(req, plan)
+    if progress:
+        await progress(0.15, f"Playwright capturing {len(targets)} screens")
+    screens = await _playwright_capture(req, targets, artifact_dir, progress)
 
     return CrawlResult(
         run_id=run_id,
@@ -161,5 +249,5 @@ async def crawl_app(req: CrawlRequest, progress: ProgressCb | None = None) -> Cr
         artifact_dir=str(artifact_dir),
         screen_count=len(screens),
         screens=screens,
-        transitions=transitions,
+        transitions=_transitions(req, plan, screens),
     )

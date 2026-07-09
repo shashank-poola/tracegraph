@@ -20,7 +20,6 @@ from src.models.schemas import (
     IngestRequest,
     JobCreated,
     JobStatus,
-    ReasonRequest,
     RepoTree,
 )
 from src.services.graph import build_knowledge_graph

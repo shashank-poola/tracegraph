@@ -107,6 +107,10 @@ class CrawlRequest(BaseModel):
     full_name: str = Field(default="", description="owner/repo — links crawl to SQLite + graph")
     routes: list[RouteSpec] = Field(default_factory=list)
     login: LoginConfig | None = None
+    # hybrid = browser-use discovers screens, Playwright captures artifacts (default)
+    # playwright = explicit routes only, no agent
+    # agent = browser-use only (lighter artifacts, no local Playwright pass)
+    crawl_mode: str = Field(default="hybrid", description="hybrid | playwright | agent")
 
 
 class InteractiveElement(BaseModel):

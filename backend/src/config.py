@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     crawl_llm_labeling: bool = True
     crawl_max_dom_bytes: int = 400_000
 
+    # browser-use cloud agent (autonomous discovery — pairs with Playwright capture)
+    browser_use_api_key: str = Field(default="", repr=False)
+    crawl_browseruse_concurrency: int = 3
+    crawl_agent_max_cost_usd: float = 2.0
+
     max_python_files: int = 200
     max_file_bytes: int = 200_000
     job_ttl_seconds: int = 3600
