@@ -34,7 +34,7 @@ app.include_router(router)
 
 @app.get("/")
 async def root() -> dict[str, str]:
-    return {"service": "trytracegraph", "docs": "/docs"}
+    return {"service": "tracegraph", "docs": "/docs"}
 
 
 def main() -> None:
