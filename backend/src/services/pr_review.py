@@ -24,29 +24,44 @@ MARK_END = "<!-- tracegraph:end -->"
 
 
 class RepoContext:
-  def __init__(
-    self,
-    tree: dict | None = None,
-    crawl: dict | None = None,
-    requirements: list[dict] | None = None,
-  ):
-    self.tree = tree
-    self.crawl = crawl
-    self.requirements = requirements or []
+    def __init__(
+        self,
+        tree: dict | None = None,
+        crawl: dict | None = None,
+        requirements: list[dict] | None = None,
+        user_id: str = "",
+    ):
+        self.tree = tree
+        self.crawl = crawl
+        self.requirements = requirements or []
+        self.user_id = user_id
 
-  @classmethod
-  def from_storage(cls, full_name: str) -> "RepoContext":
-    ctx = db.get_repo_context(full_name)
-    return cls(tree=ctx.get("tree"), crawl=ctx.get("crawl"), requirements=ctx.get("requirements") or [])
+    @classmethod
+    def from_storage(cls, full_name: str, user_id: str = "") -> "RepoContext":
+        ctx = db.get_repo_context(full_name, user_id=user_id)
+        return cls(
+            tree=ctx.get("tree"),
+            crawl=ctx.get("crawl"),
+            requirements=ctx.get("requirements") or [],
+            user_id=user_id,
+        )
 
-  @classmethod
-  def from_request(cls, full_name: str, tree=None, crawl=None, requirements=None) -> "RepoContext":
-    stored = db.get_repo_context(full_name)
-    return cls(
-      tree=tree if tree is not None else stored.get("tree"),
-      crawl=crawl if crawl is not None else stored.get("crawl"),
-      requirements=requirements if requirements is not None else (stored.get("requirements") or []),
-    )
+    @classmethod
+    def from_request(
+        cls,
+        full_name: str,
+        tree=None,
+        crawl=None,
+        requirements=None,
+        user_id: str = "",
+    ) -> "RepoContext":
+        stored = db.get_repo_context(full_name, user_id=user_id)
+        return cls(
+            tree=tree if tree is not None else stored.get("tree"),
+            crawl=crawl if crawl is not None else stored.get("crawl"),
+            requirements=requirements if requirements is not None else (stored.get("requirements") or []),
+            user_id=user_id,
+        )
 
 
 class PRVerdict(BaseModel):

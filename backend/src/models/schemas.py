@@ -13,7 +13,7 @@ class AnalyzeRequest(BaseModel):
     owner: str
     repo: str
     ref: str = ""
-    token: str = Field(..., repr=False)
+    token: str = Field(default="", repr=False, description="optional if session cookie/Bearer set")
     build_graph: bool = True
 
 

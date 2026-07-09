@@ -8,9 +8,10 @@ import hmac
 import json
 import logging
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from src.config import get_settings
+from src.core.deps import get_optional_user
 from src.models.schemas import (
     AnalyzeRequest,
     CrawlRequest,
@@ -20,7 +21,7 @@ from src.models.schemas import (
     IngestRequest,
     JobCreated,
     JobStatus,
-    RepoTree,
+    ReasonRequest,
 )
 from src.services.graph import build_knowledge_graph
 from src.services.graph_layers import connect_layers
@@ -53,11 +54,18 @@ async def health() -> dict[str, str]:
 
 
 @router.post("/analyze", response_model=JobCreated)
-async def analyze(req: AnalyzeRequest) -> JobCreated:
-    if not req.token:
-        raise HTTPException(400, "missing token")
+async def analyze(
+    req: AnalyzeRequest,
+    user: dict | None = Depends(get_optional_user),
+) -> JobCreated:
+    token = req.token or (user or {}).get("access_token", "")
+    if not token:
+        raise HTTPException(401, "login via /auth/github/login or pass token")
+    user_id = (user or {}).get("id", "")
     status = create_analyze_job(req.full_name)
-    asyncio.create_task(run_job(status.job_id, req.token, req.full_name, req.ref, req.build_graph))
+    asyncio.create_task(
+        run_job(status.job_id, token, req.full_name, req.ref, req.build_graph, user_id)
+    )
     return JobCreated(job_id=status.job_id, state=status.state)
 
 
@@ -78,33 +86,49 @@ async def graph(req: GraphRequest) -> GraphInfo:
 
 
 @router.post("/graph/connect")
-async def graph_connect(req: GraphConnectRequest) -> dict:
-    ctx = RepoContext.from_request(req.full_name, req.tree, req.crawl, req.requirements)
+async def graph_connect(
+    req: GraphConnectRequest,
+    user: dict | None = Depends(get_optional_user),
+) -> dict:
+    user_id = (user or {}).get("id", "")
+    ctx = RepoContext.from_request(req.full_name, req.tree, req.crawl, req.requirements, user_id)
     paths = [f.get("path", "") for f in (ctx.tree or {}).get("files", [])]
     return await connect_layers(req.full_name, ctx.requirements, ctx.crawl, paths)
 
 
 @router.post("/crawl", response_model=JobCreated)
-async def crawl(req: CrawlRequest) -> JobCreated:
+async def crawl(
+    req: CrawlRequest,
+    user: dict | None = Depends(get_optional_user),
+) -> JobCreated:
     if not req.base_url:
         raise HTTPException(400, "missing base_url")
+    user_id = (user or {}).get("id", "")
     status = create_crawl_job(req.full_name or None)
-    asyncio.create_task(run_crawl_job(status.job_id, req))
+    asyncio.create_task(run_crawl_job(status.job_id, req, user_id))
     return JobCreated(job_id=status.job_id, state=status.state)
 
 
 @router.post("/ingest", response_model=JobCreated)
-async def ingest(req: IngestRequest) -> JobCreated:
+async def ingest(
+    req: IngestRequest,
+    user: dict | None = Depends(get_optional_user),
+) -> JobCreated:
     if not req.source:
         raise HTTPException(400, "missing source")
+    user_id = (user or {}).get("id", "")
     status = create_ingest_job(req.full_name or None)
-    asyncio.create_task(run_ingest_job(status.job_id, req))
+    asyncio.create_task(run_ingest_job(status.job_id, req, user_id))
     return JobCreated(job_id=status.job_id, state=status.state)
 
 
 @router.post("/reason", status_code=202)
-async def reason(req: ReasonRequest) -> dict[str, str]:
-    ctx = RepoContext.from_request(req.full_name, req.tree, req.crawl, req.requirements)
+async def reason(
+    req: ReasonRequest,
+    user: dict | None = Depends(get_optional_user),
+) -> dict[str, str]:
+    user_id = (user or {}).get("id", "")
+    ctx = RepoContext.from_request(req.full_name, req.tree, req.crawl, req.requirements, user_id)
     asyncio.create_task(run_reason_job(req.full_name, req.pr_number, ctx))
     return {"status": "accepted", "repo": req.full_name, "pr": str(req.pr_number)}
 

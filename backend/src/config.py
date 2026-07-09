@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -13,6 +13,25 @@ class Settings(BaseSettings):
 
     frontend_origin: str = "http://localhost:3000"
     log_level: str = "INFO"
+
+    # GitHub OAuth (user login — distinct from GitHub App webhook)
+    github_oauth_client_id: str = Field(
+        default="",
+        validation_alias=AliasChoices("GITHUB_OAUTH_CLIENT_ID", "GITHUB_APP_CLIENT_ID"),
+    )
+    github_oauth_client_secret: str = Field(
+        default="",
+        repr=False,
+        validation_alias=AliasChoices("GITHUB_OAUTH_CLIENT_SECRET", "GITHUB_APP_CLIENT_SECRET"),
+    )
+    github_oauth_callback_url: str = "http://localhost:8000/auth/github/callback"
+    server_jwt_secret: str = Field(
+        default="",
+        repr=False,
+        validation_alias=AliasChoices("SERVER_JWT_SECRET", "JWT_SECRET"),
+    )
+    session_ttl_seconds: int = 60 * 60 * 24 * 7
+    oauth_cookie_secure: bool = False
 
     # LLM chain: GLM 5.2 → Groq GPT-OSS → Gemini
     zai_api_key: str = Field(default="", repr=False)

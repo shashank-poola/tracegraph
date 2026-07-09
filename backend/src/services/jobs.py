@@ -44,7 +44,14 @@ class JobStore:
 store = JobStore()
 
 
-async def run_job(job_id: str, token: str, full_name: str, ref: str, build_graph: bool = True) -> None:
+async def run_job(
+    job_id: str,
+    token: str,
+    full_name: str,
+    ref: str,
+    build_graph: bool = True,
+    user_id: str = "",
+) -> None:
     status = store.get(job_id)
     if not status:
         return
@@ -78,7 +85,7 @@ async def run_job(job_id: str, token: str, full_name: str, ref: str, build_graph
         status.progress = 1.0
         if not status.message.startswith("graph step failed"):
             status.message = "complete"
-        db.save_repo_tree(full_name, tree.model_dump(), ref=ref, job_id=job_id)
+        db.save_repo_tree(full_name, tree.model_dump(), ref=ref, job_id=job_id, user_id=user_id)
         db.update_job(job_id, state="done", progress=1.0, message=status.message)
     except Exception as exc:  # noqa: BLE001
         logger.exception("analyze job failed: %s", exc)
@@ -88,7 +95,7 @@ async def run_job(job_id: str, token: str, full_name: str, ref: str, build_graph
         db.update_job(job_id, state="error", error=str(exc), message="failed")
 
 
-async def run_crawl_job(job_id: str, req: CrawlRequest) -> None:
+async def run_crawl_job(job_id: str, req: CrawlRequest, user_id: str = "") -> None:
     status = store.get(job_id)
     if not status:
         return
@@ -107,7 +114,9 @@ async def run_crawl_job(job_id: str, req: CrawlRequest) -> None:
         status.progress = 1.0
         status.message = f"crawled {result.screen_count} screens"
         if req.full_name:
-            db.save_crawl_result(req.full_name, req.base_url, result.model_dump(), job_id=job_id)
+            db.save_crawl_result(
+                req.full_name, req.base_url, result.model_dump(), job_id=job_id, user_id=user_id
+            )
         db.update_job(job_id, state="done", progress=1.0, message=status.message)
     except Exception as exc:  # noqa: BLE001
         logger.exception("crawl failed: %s", exc)
@@ -116,7 +125,7 @@ async def run_crawl_job(job_id: str, req: CrawlRequest) -> None:
         db.update_job(job_id, state="error", error=str(exc))
 
 
-async def run_ingest_job(job_id: str, req: IngestRequest) -> None:
+async def run_ingest_job(job_id: str, req: IngestRequest, user_id: str = "") -> None:
     status = store.get(job_id)
     if not status:
         return
@@ -130,7 +139,9 @@ async def run_ingest_job(job_id: str, req: IngestRequest) -> None:
         status.progress = 1.0
         status.message = f"extracted {result.requirement_count} requirements"
         key = req.full_name or req.source
-        db.save_ingest_result(key, req.source, req.source_type, result.model_dump(), job_id=job_id)
+        db.save_ingest_result(
+            key, req.source, req.source_type, result.model_dump(), job_id=job_id, user_id=user_id
+        )
         db.update_job(job_id, state="done", progress=1.0, message=status.message)
     except Exception as exc:  # noqa: BLE001
         logger.exception("ingest failed: %s", exc)
