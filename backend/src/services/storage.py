@@ -140,6 +140,13 @@ CREATE TABLE IF NOT EXISTS pr_reviews (
 );
 
 CREATE INDEX IF NOT EXISTS idx_pr_reviews_repo ON pr_reviews(full_name);
+
+CREATE TABLE IF NOT EXISTS tracked_repos (
+    user_id     TEXT NOT NULL,
+    full_name   TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    PRIMARY KEY (user_id, full_name)
+);
 """
 
 
@@ -476,6 +483,35 @@ def list_pr_reviews(
         data["verdict_json"] = json.loads(data["verdict_json"])
         out.append(data)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Tracked repos — dashboard favorites
+# ---------------------------------------------------------------------------
+
+
+def track_repo(user_id: str, full_name: str) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO tracked_repos (user_id, full_name, created_at) VALUES (?, ?, ?)",
+            (user_id, full_name, _now()),
+        )
+
+
+def untrack_repo(user_id: str, full_name: str) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "DELETE FROM tracked_repos WHERE user_id = ? AND full_name = ?",
+            (user_id, full_name),
+        )
+
+
+def list_tracked_repos(user_id: str) -> set[str]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT full_name FROM tracked_repos WHERE user_id = ?", (user_id,)
+        ).fetchall()
+    return {row["full_name"] for row in rows}
 
 
 # ---------------------------------------------------------------------------

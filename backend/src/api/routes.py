@@ -116,6 +116,8 @@ async def ingest(
 ) -> JobCreated:
     if not req.source:
         raise HTTPException(400, "missing source")
+    if not req.token and req.source_type in {"github_repo", "github_readme"}:
+        req.token = (user or {}).get("access_token", "")
     user_id = (user or {}).get("id", "")
     status = create_ingest_job(req.full_name or None)
     asyncio.create_task(run_ingest_job(status.job_id, req, user_id))
