@@ -15,8 +15,8 @@ const GRAPH_STEPS: Step[] = [
 
 const CRAWL_STEPS: Step[] = [
   { label: "Discover screens", at: 0.2 },
-  { label: "Capture DOM & screenshots", at: 0.55 },
-  { label: "Map transitions", at: 0.85 },
+  { label: "Attach screenshots", at: 0.55 },
+  { label: "Label screens", at: 0.85 },
 ];
 
 const INGEST_STEPS: Step[] = [

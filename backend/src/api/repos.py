@@ -120,6 +120,15 @@ async def repo_tree(owner: str, repo: str, user: dict = Depends(get_current_user
     return tree
 
 
+@router.get("/{owner}/{repo}/crawl")
+async def repo_crawl(owner: str, repo: str, user: dict = Depends(get_current_user)) -> dict:
+    full_name = f"{owner}/{repo}"
+    result = db.get_crawl_result(full_name, user_id=user["id"])
+    if not result:
+        raise HTTPException(404, "no crawl result for this repository")
+    return result
+
+
 @router.get("/{owner}/{repo}/ingest")
 async def repo_ingest(owner: str, repo: str, user: dict = Depends(get_current_user)) -> dict:
     full_name = f"{owner}/{repo}"

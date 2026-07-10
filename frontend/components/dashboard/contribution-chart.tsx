@@ -25,7 +25,7 @@ export function ContributionChart({
   }
 
   return (
-    <div className="flex w-full flex-col gap-2 border-t border-border pt-4">
+    <div className="-mx-3 flex w-[calc(100%+1.5rem)] flex-col gap-2 border-t border-border pt-4">
       <div className="flex items-baseline justify-between">
         <span className="text-xs text-muted">Contributions</span>
         <span className="font-heading text-sm text-foreground">
@@ -33,17 +33,17 @@ export function ContributionChart({
         </span>
       </div>
       <div
-        className="grid w-full gap-[2px]"
+        className="grid w-full gap-px"
         style={{ gridTemplateColumns: `repeat(${weeks.length}, minmax(0, 1fr))` }}
       >
         {weeks.map((week, wi) => (
-          <div key={wi} className="flex min-w-0 flex-col gap-[2px]">
+          <div key={wi} className="flex min-w-0 flex-col gap-px">
             {week.map((day) => (
               <div
                 key={day.date}
                 title={`${day.count} on ${day.date}`}
                 className={cn(
-                  "aspect-square w-full rounded-[2px]",
+                  "h-[5px] w-full rounded-[1px]",
                   level(day.count),
                 )}
               />

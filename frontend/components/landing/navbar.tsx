@@ -11,10 +11,10 @@ export function Navbar() {
           <Image
             src="/logo.png"
             alt="TraceGraph"
-            width={200}
-            height={50}
+            width={240}
+            height={60}
             priority
-            className="h-8 w-auto"
+            className="h-10 w-auto"
           />
         </Link>
 

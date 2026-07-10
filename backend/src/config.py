@@ -63,7 +63,7 @@ class Settings(BaseSettings):
     github_app_private_key: str = Field(default="", repr=False)
     github_webhook_secret: str = Field(default="", repr=False)
 
-    # Crawl (Playwright)
+    # Crawl artifacts + browser-use cloud agent
     crawl_artifact_dir: str = "artifacts"
     crawl_headless: bool = True
     crawl_max_screens: int = 40
@@ -71,7 +71,7 @@ class Settings(BaseSettings):
     crawl_llm_labeling: bool = True
     crawl_max_dom_bytes: int = 400_000
 
-    # browser-use cloud agent (autonomous discovery — pairs with Playwright capture)
+    # browser-use cloud agent (autonomous discovery + cloud screenshots)
     browser_use_api_key: str = Field(default="", repr=False)
     crawl_browseruse_concurrency: int = 3
     crawl_agent_max_cost_usd: float = 2.0

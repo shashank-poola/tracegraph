@@ -5,7 +5,15 @@ from __future__ import annotations
 import logging
 import time
 from src.config import get_settings
-from src.models.schemas import CrawlRequest, IngestRequest, JobState, JobStatus, RepoTree
+from src.models.schemas import (
+    CrawlRequest,
+    CrawlResult,
+    IngestRequest,
+    JobState,
+    JobStatus,
+    RepoTree,
+    ScreenInfo,
+)
 from src.services import storage as db
 from src.services.ast_parser import build_tree
 from src.services.crawler import crawl_app
@@ -105,10 +113,23 @@ async def run_crawl_job(job_id: str, req: CrawlRequest, user_id: str = "") -> No
         status.message = message
         db.update_job(job_id, progress=status.progress, message=message)
 
+    captured: list[ScreenInfo] = []
+
+    async def on_screen(screen: ScreenInfo) -> None:
+        # Surface each screen the moment it's captured so a client polling
+        # this job can render a live, growing feed instead of one final result.
+        captured.append(screen)
+        status.crawl_result = CrawlResult(
+            run_id=job_id,
+            base_url=req.base_url,
+            screen_count=len(captured),
+            screens=list(captured),
+        )
+
     try:
         status.state = JobState.running
         db.update_job(job_id, state="running")
-        result = await crawl_app(req, progress)
+        result = await crawl_app(req, progress, on_screen)
         status.crawl_result = result
         status.state = JobState.done
         status.progress = 1.0
@@ -121,8 +142,8 @@ async def run_crawl_job(job_id: str, req: CrawlRequest, user_id: str = "") -> No
     except Exception as exc:  # noqa: BLE001
         logger.exception("crawl failed: %s", exc)
         status.state = JobState.error
-        status.error = str(exc)
-        db.update_job(job_id, state="error", error=str(exc))
+        status.error = str(exc) or type(exc).__name__
+        db.update_job(job_id, state="error", error=status.error)
 
 
 async def run_ingest_job(job_id: str, req: IngestRequest, user_id: str = "") -> None:
@@ -130,10 +151,17 @@ async def run_ingest_job(job_id: str, req: IngestRequest, user_id: str = "") -> 
     if not status:
         return
 
+    async def progress(value: float, message: str) -> None:
+        status.progress = round(min(max(value, 0.0), 1.0), 3)
+        status.message = message
+        db.update_job(job_id, progress=status.progress, message=message)
+
     try:
         status.state = JobState.running
-        db.update_job(job_id, state="running", message="Parsing document")
-        result = await ingest_doc(req)
+        status.progress = 0.02
+        status.message = "Fetch documentation"
+        db.update_job(job_id, state="running", progress=0.02, message=status.message)
+        result = await ingest_doc(req, progress)
         status.ingest_result = result
         status.state = JobState.done
         status.progress = 1.0

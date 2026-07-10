@@ -107,10 +107,10 @@ class CrawlRequest(BaseModel):
     full_name: str = Field(default="", description="owner/repo — links crawl to SQLite + graph")
     routes: list[RouteSpec] = Field(default_factory=list)
     login: LoginConfig | None = None
-    # hybrid = browser-use discovers screens, Playwright captures artifacts (default)
-    # playwright = explicit routes only, no agent
-    # agent = browser-use only (lighter artifacts, no local Playwright pass)
-    crawl_mode: str = Field(default="hybrid", description="hybrid | playwright | agent")
+    # hybrid = browser-use discovers screens + cloud screenshots (default)
+    # agent = same as hybrid
+    # playwright = legacy alias for explicit routes only (no local browser)
+    crawl_mode: str = Field(default="hybrid", description="hybrid | agent | playwright")
 
 
 class InteractiveElement(BaseModel):
@@ -158,6 +158,7 @@ class CrawlResult(BaseModel):
     screen_count: int = 0
     screens: list[ScreenInfo] = []
     transitions: list[Transition] = []
+    capture_note: str = ""
 
 
 class IngestRequest(BaseModel):

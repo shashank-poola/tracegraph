@@ -77,7 +77,7 @@ export default function RepoDetailPage({
               </p>
               <div className="mt-4 flex flex-col gap-4">
                 <AnalysisTools repo={repo} onAnalyzed={load} />
-                <LiveCrawl fullName={repo.full_name} onCrawled={load} />
+                <LiveCrawl repo={repo} onCrawled={load} />
               </div>
             </section>
 

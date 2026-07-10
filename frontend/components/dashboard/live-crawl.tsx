@@ -1,27 +1,59 @@
 "use client";
 
-import { useState } from "react";
-import { Compass, Lock, Plus, Trash2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { ChevronRight, Compass, Lock, Plus, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { PipelineProgress } from "@/components/dashboard/pipeline-progress";
-import { type JobStatus, pollJob, startCrawl } from "@/lib/api";
+import { CrawlLiveFeed } from "@/components/dashboard/crawl-live-feed";
+import { CrawlModal } from "@/components/dashboard/crawl-modal";
+import {
+  type CrawlResult,
+  type JobStatus,
+  type RepoDetail,
+  getRepoCrawl,
+  pollJob,
+  startCrawl,
+} from "@/lib/api";
 
 type Route = { path: string; authenticated: boolean };
-type Screen = { url: string; title?: string; label?: string };
 
 export function LiveCrawl({
-  fullName,
+  repo,
   onCrawled,
 }: {
-  fullName: string;
+  repo: RepoDetail;
   onCrawled: () => void;
 }) {
   const [baseUrl, setBaseUrl] = useState("");
   const [routes, setRoutes] = useState<Route[]>([{ path: "/", authenticated: false }]);
   const [job, setJob] = useState<JobStatus | null>(null);
   const [running, setRunning] = useState(false);
-  const [screens, setScreens] = useState<Screen[] | null>(null);
+  const [result, setResult] = useState<CrawlResult | null>(null);
+  const [modalOpen, setModalOpen] = useState(false);
+
+  useEffect(() => {
+    if (repo.status.has_crawl) {
+      getRepoCrawl(repo.full_name)
+        .then(setResult)
+        .catch(() => setResult(null));
+    } else {
+      setResult(null);
+    }
+  }, [repo.full_name, repo.status.has_crawl]);
+
+  async function openDetails() {
+    if (result) {
+      setModalOpen(true);
+      return;
+    }
+    try {
+      setResult(await getRepoCrawl(repo.full_name));
+      setModalOpen(true);
+    } catch {
+      // no-op
+    }
+  }
 
   function updateRoute(index: number, patch: Partial<Route>) {
     setRoutes((prev) => prev.map((r, i) => (i === index ? { ...r, ...patch } : r)));
@@ -35,18 +67,19 @@ export function LiveCrawl({
     if (!baseUrl.trim()) return;
     setRunning(true);
     setJob(null);
-    setScreens(null);
     try {
       const { job_id } = await startCrawl({
         base_url: baseUrl.trim(),
-        full_name: fullName,
+        full_name: repo.full_name,
         routes: routes.filter((r) => r.path.trim()),
         crawl_mode: "hybrid",
       });
       const final = await pollJob(job_id, setJob);
       if (final.state === "done") {
-        const result = final.crawl_result as { screens?: Screen[] } | undefined;
-        setScreens(result?.screens ?? []);
+        if (final.crawl_result) {
+          setResult(final.crawl_result);
+          setModalOpen(true);
+        }
         onCrawled();
       }
     } catch (err) {
@@ -62,6 +95,9 @@ export function LiveCrawl({
     }
   }
 
+  const isRunning = job && job.state !== "done" && job.state !== "error";
+  const liveScreens = job?.crawl_result?.screens ?? [];
+
   return (
     <div className="rounded-xl border border-border p-5">
       <div className="flex items-center gap-2">
@@ -71,9 +107,9 @@ export function LiveCrawl({
         </h3>
       </div>
       <p className="mt-1 text-xs leading-5 text-muted">
-        List the routes to capture and mark each public or authenticated. The
-        browser visits each, captures DOM + screenshot, and maps how the
-        screens connect.
+        List the routes to capture and mark each public or authenticated. A
+        browser-use agent explores the app, captures cloud screenshots, and maps
+        how the screens connect.
       </p>
 
       <div className="mt-4 grid gap-4 sm:grid-cols-2">
@@ -138,34 +174,48 @@ export function LiveCrawl({
           {job && <PipelineProgress status={job} kind="crawl" />}
         </div>
 
-        <div className="rounded-lg border border-border p-4">
-          {!screens && (
+        <div className="flex flex-col rounded-lg border border-border p-4">
+          {isRunning ? (
+            <>
+              <p className="mb-3 flex items-center gap-2 text-[11px] font-medium uppercase tracking-wider text-muted">
+                Crawled {liveScreens.length}{" "}
+                {liveScreens.length === 1 ? "screen" : "screens"}
+              </p>
+              <CrawlLiveFeed screens={liveScreens} statusMessage={job.message} />
+            </>
+          ) : result ? (
+            <button
+              type="button"
+              onClick={openDetails}
+              className="flex flex-1 items-center justify-between gap-3 rounded-lg border border-border px-3 py-2.5 text-left transition-colors hover:bg-white/[0.03]"
+            >
+              <div className="flex flex-col gap-0.5">
+                <span className="text-xs text-foreground">
+                  Crawled {result.screen_count.toLocaleString()}{" "}
+                  {result.screen_count === 1 ? "screen" : "screens"} ·{" "}
+                  {result.transitions.length.toLocaleString()} transitions
+                </span>
+                <span className="text-[11px] text-muted">Saved to DB</span>
+              </div>
+              <span className="flex shrink-0 items-center gap-0.5 text-xs text-muted">
+                View screen graph & browser responses{" "}
+                <ChevronRight className="h-3.5 w-3.5" />
+              </span>
+            </button>
+          ) : (
             <p className="flex h-full items-center justify-center text-center text-xs text-muted">
               Crawl results appear here.
             </p>
           )}
-          {screens && screens.length === 0 && (
-            <p className="text-center text-xs text-muted">
-              No screens captured.
-            </p>
-          )}
-          {screens && screens.length > 0 && (
-            <ul className="flex flex-col gap-2">
-              {screens.slice(0, 8).map((s, i) => (
-                <li key={i} className="text-xs text-foreground">
-                  <span className="text-muted">{i + 1}.</span>{" "}
-                  {s.label || s.title || s.url}
-                </li>
-              ))}
-              {screens.length > 8 && (
-                <li className="text-xs text-muted">
-                  +{screens.length - 8} more screens
-                </li>
-              )}
-            </ul>
-          )}
         </div>
       </div>
+
+      <CrawlModal
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+        fullName={repo.full_name}
+        result={result}
+      />
     </div>
   );
 }

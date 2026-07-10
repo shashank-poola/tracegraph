@@ -10,9 +10,9 @@ export function Footer() {
         <Image
           src="/logo.png"
           alt="TraceGraph"
-          width={100}
-          height={33}
-          className="h-5 w-auto opacity-80"
+          width={120}
+          height={40}
+          className="h-6 w-auto opacity-80"
         />
         <span>Knowledge graphs for pull request blast radius.</span>
       </div>

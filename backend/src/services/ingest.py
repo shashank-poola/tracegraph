@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+from typing import Awaitable, Callable
 
 import httpx
 
@@ -15,6 +17,7 @@ from src.models.schemas import IngestRequest, IngestResult, Requirement
 logger = logging.getLogger("ingest")
 GH_API = "https://api.github.com"
 _HEADING = re.compile(r"^(#{1,6})\s+(.*)$", re.MULTILINE)
+ProgressCb = Callable[[float, str], Awaitable[None]]
 
 _REQ_SYSTEM = (
     "Turn product documentation into testable requirements for a QA lead. "
@@ -118,25 +121,50 @@ async def _fetch_repo_docs(req: IngestRequest) -> tuple[str, list[str]]:
     return "\n\n".join(f"# {p}\n\n{docs[p]}" for p in files), files
 
 
-async def ingest_doc(req: IngestRequest) -> IngestResult:
+async def ingest_doc(req: IngestRequest, progress: ProgressCb | None = None) -> IngestResult:
+    if progress:
+        await progress(0.08, "Fetching documentation")
+
     files: list[str] = []
     if req.source_type == "github_repo":
         raw, files = await _fetch_repo_docs(req)
     else:
         raw = await _fetch_source(req)
 
-    requirements: list[Requirement] = []
-    for heading, body in _split_sections(raw):
-        requirements.extend(await _extract_requirements(heading, body))
+    sections = _split_sections(raw)
+    if progress:
+        await progress(0.2, f"Extracting {len(sections)} requirement section(s)")
+
+    sem = asyncio.Semaphore(get_settings().llm_concurrency)
+    total = len(sections) or 1
+    done = 0
+
+    async def extract_one(heading: str, body: str) -> list[Requirement]:
+        nonlocal done
+        async with sem:
+            result = await _extract_requirements(heading, body)
+        done += 1
+        if progress:
+            await progress(0.2 + 0.6 * (done / total), f"Extracted {done}/{total} sections")
+        return result
+
+    batches = await asyncio.gather(*(extract_one(heading, body) for heading, body in sections))
+    requirements: list[Requirement] = [r for batch in batches for r in batch]
     for i, r in enumerate(requirements, start=1):
         r.req_id = f"R{i}"
+
+    if progress:
+        await progress(0.88, "Generating overview")
+    overview = await _generate_overview(raw, files)
+    if progress:
+        await progress(1.0, "Persisting layers")
 
     return IngestResult(
         source=req.source,
         source_type=req.source_type,
         requirement_count=len(requirements),
         requirements=requirements,
-        overview=await _generate_overview(raw, files),
+        overview=overview,
         excerpt=raw[:1000],
         files=files,
     )

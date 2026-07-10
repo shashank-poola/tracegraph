@@ -84,6 +84,35 @@ export type RepoTree = {
   } | null;
 };
 
+export type ScreenInfo = {
+  screen_id: string;
+  url: string;
+  title?: string;
+  authenticated?: boolean;
+  interactive_count?: number;
+  screenshot_url?: string;
+  label?: string;
+  purpose?: string;
+  primary_actions?: string[];
+  key_components?: string[];
+};
+
+export type Transition = {
+  from_screen: string;
+  to_screen: string;
+  action?: string;
+};
+
+export type CrawlResult = {
+  run_id: string;
+  base_url: string;
+  artifact_dir?: string;
+  screen_count: number;
+  screens: ScreenInfo[];
+  transitions: Transition[];
+  capture_note?: string;
+};
+
 export type IngestResult = {
   source: string;
   source_type?: string;
@@ -108,7 +137,7 @@ export type JobStatus = {
   message: string;
   error: string | null;
   result?: unknown;
-  crawl_result?: unknown;
+  crawl_result?: CrawlResult;
   ingest_result?: unknown;
 };
 
@@ -218,6 +247,10 @@ export function getRepoTree(fullName: string): Promise<RepoTree> {
 
 export function getRepoIngest(fullName: string): Promise<IngestResult> {
   return api(`/repos/${fullName}/ingest`);
+}
+
+export function getRepoCrawl(fullName: string): Promise<CrawlResult> {
+  return api(`/repos/${fullName}/crawl`);
 }
 
 export function getRepoPull(
