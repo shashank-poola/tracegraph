@@ -94,7 +94,6 @@ OAuth callback should match `GITHUB_OAUTH_CALLBACK_URL` (default `http://localho
 ---
 
 ## Live Preview(TraceGraph Dashboard)
-# Architecture
 
 ![TraceGraph Demo1](././docs/demo_ui/demo1.png)
 ![TraceGraph Demo2](././docs/demo_ui/demo2.png)
