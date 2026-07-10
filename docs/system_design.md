@@ -1,644 +1,567 @@
-# TraceGraph — System Design (Implementation-Derived)
+# TraceGraph — Design Document (Part B)
 
-> Derived from the codebase under `backend/src` and `frontend/`. When something is not implemented, it is labeled **Absent**. Do not treat marketing analogies (e.g. “search”) as architecture unless a file path is cited.
+A testing-intelligence system that crawls a live app, ingests a product spec, builds a three-layer knowledge graph (**Requirements / UI / Code**), and reasons about the blast radius of a real Pull Request — then posts a comment a non-engineer QA lead can actually read.
 
-Companion docs: [`overview.md`](./overview.md) · [`eval_and_scope.md`](./eval_and_scope.md)
+**Read this alongside the code.** Where the code and this document disagree, the code wins and I treat the gap as a bug in the document. I have tried hard not to describe anything as “built” that isn’t. Sections that describe intended design are labelled **PLANNED — not built**.
+
+Sample blast-radius output: [`sample_output.md`](./sample_output.md)  
+Non-technical overview: [`overview.md`](./overview.md)  
+Evolution / eval / scope deep-dive: [`eval_and_scope.md`](./eval_and_scope.md)
 
 ---
 
-# Task 1 — High-Level Architecture
+## 0. System at a glance
 
-## 1.1 Real topology
+TraceGraph is **two processes** plus a small set of external systems:
 
+| Piece | What it does |
+|-------|----------------|
+| **Backend — FastAPI (Python)** | All heavy work: AST parse, LLM description, Neo4j writes, crawl orchestration, PR review, GitHub App auth. Owns SQLite persistence. |
+| **Frontend — Next.js** | Dashboard, OAuth/install UX, job progress polling, viewing trees / crawls / PRs. Talks to the API with a cookie session. It is **not** the database. |
+| **SQLite** | System of record for jobs metadata, `repo_trees`, `crawl_results`, `ingest_results`, sessions, PR reviews. What the webhook reads when there is no logged-in user. |
+| **Neo4j Aura** | The knowledge graph. One shared instance; every repo is its own namespaced subgraph. Core to the *graph* product; soft-optional at runtime so analyze/PR still work if Aura is down. |
+| **browser-use cloud** | The crawler. We do not drive a local Playwright browser ourselves. |
+| **LLM providers** | GLM → Groq → Gemini fallback (`core/llm.py`). High-volume describe/ingest and the cross-layer / blast-radius calls share this client. |
+| **GitHub OAuth** | Human login + user token for listing repos and fetching tarballs from the dashboard. |
+| **GitHub App** | Installation token, webhooks, posting/updating PR comments. Separate from OAuth on purpose. |
+
+### System architecture
+
+![TraceGraph system architecture](./architecture.png)
+
+*Figure 1 — End-to-end architecture: Next.js + GitHub webhook into FastAPI; three prep lanes (Knowledge Graph → Neo4j, Ingest → parse docs, Live Crawl → browser-use); artifacts converge in SQLite; on PR, load SQLite + diff → LLM blast radius → TraceGraph comment on the PR.*
+
+The same shape as a Mermaid sketch (for readers who prefer text diagrams):
+
+```mermaid
+flowchart TB
+  FE[Next.js — auth + bot install] -->|cookie session| API[FastAPI backend]
+  WH[GitHub webhook — PR raised] --> Reason
+
+  API --> KG[Knowledge Graph / Analyze]
+  API --> IN[Ingest — product requirements]
+  API --> CR[Live Crawl]
+
+  KG --> Neo4j[(Neo4j)]
+  KG --> SQLite[(SQLite)]
+  IN --> SQLite
+  CR --> BU[browser-use]
+  BU --> SQLite
+
+  SQLite --> Reason[Load SQLite + PR diff\nBuild context\nLLM blast radius]
+  WH --> Reason
+  Reason --> Comment[TraceGraph comment on PR]
 ```
-┌──────────────────┐   cookie: tracegraph_session    ┌────────────────────────────┐
-│  Next.js (3000)  │ ───────────────────────────────▶│  FastAPI (8000)             │
-│  App Router UI   │   credentials: "include"         │  src/main.py                │
-└──────────────────┘                                  │  routers: auth, repos, api  │
-                                                      └─────────────┬──────────────┘
-                                                                    │
-                    ┌───────────────┬─────────────────┬─────────────┼──────────────┐
-                    ▼               ▼                 ▼             ▼              ▼
-             Analyze job      Crawl job        Ingest job    Reason job     Auth / Repos
-             asyncio task     asyncio task     asyncio task  asyncio task   sync handlers
-                    │               │                 │             │              │
-                    ▼               ▼                 ▼             ▼              ▼
-             GitHub tarball   browser-use       GitHub docs    GitHub App     SQLite users/
-             AST + LLM        Cloud SDK         + LLM reqs     PR + comment   sessions/oauth
-             Neo4j (opt)      disk artifacts                   SQLite review  tracked_repos
-                    │               │                 │
-                    └───────────────┴────────┬────────┘
-                                             ▼
-                                      SQLite artifacts
-                                      repo_trees / crawl_results / ingest_results
-                                      (+ Neo4j code / optional layer edges)
+
+**How to read Figure 1 in one breath:** the dashboard builds three memories of the product; SQLite holds them; a PR webhook loads that memory plus the diff; one LLM call writes the blast-radius comment back to GitHub.
+
+**Important split:** OAuth is for humans using the dashboard. The GitHub App is for the bot. Installing the App is not the same as “Track” (favorites) and not the same as logging in.
+
+---
+
+## 0.1 Operator journey through the dashboard
+
+The stages map to actions an operator takes from the dashboard, in order. Each of analyze / ingest / crawl is independently re-runnable. Reason is event-driven off GitHub (or a manual `POST /reason`).
+
+| # | Operator action | API | What gets stored |
+|---|-----------------|-----|------------------|
+| 1 | Sign in + install GitHub App | `/auth/github/*` | `users`, `sessions`, `github_installations` |
+| 2 | Open a repo (optional Track) | `/repos/...` | `tracked_repos` (favorites only) |
+| 3 | Generate knowledge graph | `POST /analyze` | `repo_trees` + Neo4j code subgraph |
+| 4 | Ingest documentation | `POST /ingest` | `ingest_results` |
+| 5 | Crawl the live app | `POST /crawl` | `crawl_results` (+ `artifacts/<run_id>/`) |
+| 6 | *(Optional)* Connect layers | `POST /graph/connect` | Cross-layer Neo4j edges + gaps |
+| 7 | Open / sync a PR | Webhook → reason job | `pr_reviews` + GitHub comment |
+
+```mermaid
+flowchart LR
+  Login[Login + App install] --> Open[Open repo]
+  Open --> Analyze[Analyze code]
+  Open --> Ingest[Ingest docs]
+  Open --> Crawl[Crawl UI]
+  Analyze --> Ready[Layers in SQLite]
+  Ingest --> Ready
+  Crawl --> Ready
+  Ready --> PR[PR opened / synchronized]
+  PR --> Comment[Blast-radius comment]
 ```
 
-## 1.2 Component map (what exists)
+*Figure 2 — Operator journey. Stages 3–5 can run in any order; Reason only needs whatever is already stored (and degrades honestly when a layer is missing).*
 
-| Your checklist item | TraceGraph reality | Primary code |
-|---------------------|--------------------|--------------|
-| Frontend | Next.js 16 App Router, React 19, Tailwind 4 | `frontend/` |
-| Backend | FastAPI, thin routes, logic in `services/` | `backend/src/` |
-| Database | SQLite (WAL) | `storage.py` |
-| Storage | SQLite JSON blobs + `artifacts/<run_id>/` for crawl manifests | `storage.py`, `crawler.py` |
-| Queue / Workers | **Absent as a product.** In-process `asyncio.create_task` + in-memory `JobStore` | `routes.py`, `jobs.py` |
-| AI Services | Multi-provider LLM client (GLM → Groq → Gemini) | `core/llm.py` |
-| External APIs | GitHub OAuth, GitHub REST, GitHub App, browser-use, LLM providers, Neo4j Aura | various |
-| Authentication | Cookie session on API + optional Bearer; separate GitHub App install | `auth.py`, `github_app.py` |
-| Crawler | browser-use agent per user-supplied route (+ sidebar expansion) | `crawler.py` |
-| Knowledge Graph | Neo4j property graph from AST; optional Req↔Screen↔File linking | `graph.py`, `graph_layers.py` |
-| Ingestion Pipeline | Docs → markdown sections → structured requirements (not embeddings) | `ingest.py` |
-| Search | **Absent.** No vector/keyword search service | — |
-| Report Generation | Markdown PR comment upserted by GitHub App | `pr_review.py`, `github_app.py` |
+**Jobs model:** each of analyze / crawl / ingest is `asyncio.create_task` inside the API process. The HTTP handler returns a `job_id` immediately; the UI polls `GET /jobs/{id}` about every 1.5s. There is **no Redis/Celery**. Live progress lives in memory (lost on API restart). Completed artifacts in SQLite survive.
 
-## 1.3 How components talk
+**Running example:** a real public app + repo you connect in the dashboard (for our demos, a Streamlit-style expense / todo style app works well because the UI is Python and the code layer can see the same files the screens come from). A UI-only PR is the textbook blast-radius case: look changes everywhere, engine logic nowhere. See [`sample_output.md`](./sample_output.md) for a real comment shape.
 
-| From → To | Mechanism |
-|-----------|-----------|
-| Frontend → Backend | `fetch(NEXT_PUBLIC_API_URL + path, { credentials: "include" })` — `frontend/lib/api.ts` |
-| Backend → Frontend (OAuth) | 302 redirect to `FRONTEND_ORIGIN/auth/callback` with `Set-Cookie` — `api/auth.py` |
-| Routes → Jobs | `asyncio.create_task(run_*_job(...))` returns `job_id` immediately — `api/routes.py` |
-| Frontend → Jobs | Poll `GET /jobs/{id}` every 1.5s — `pollJob` in `lib/api.ts` |
-| Jobs → SQLite | `db.save_repo_tree` / `save_crawl_result` / `save_ingest_result` / `save_pr_review` |
-| Analyze → Neo4j | `build_knowledge_graph(tree)` after describe — `jobs.run_analyze_job` |
-| Webhook → Reason | HMAC verify → `create_task(run_reason_job)` — `routes.github_webhook` |
-| Reason → GitHub | Installation JWT → installation token → PR API + issue comments — `github_app.py` |
+---
 
-## Mermaid — communication
+## 1. Why this shape (product thesis)
+
+Code review tools are good at diffs. They are weak at the question a QA lead actually asks: *what product behavior does this PR touch?*
+
+- Static analysis sees functions.  
+- E2E suites see clicks.  
+- Specs live in markdown nobody re-reads.  
+
+Those layers rarely meet in one place, so reviewers guess. TraceGraph’s bet:
+
+1. Build **structure you can trust** (AST edges, screen transitions from real hrefs) once.  
+2. Attach **language** with bounded LLM calls (descriptions, requirements, verdict).  
+3. At PR time, **assemble** those layers + the diff and ask for one structured blast-radius judgement.  
+
+We deliberately did **not** build a free-roaming “agent that does everything in one loop.” That is hard to debug and easy to oversell. The brief asked for judgement under time pressure — a pipeline with hard boundaries is the honest answer.
+
+---
+
+## 2. Agent decomposition
+
+### 2.1 The honest claim first
+
+This is **not one agent loop**. It is a pipeline of stages, each with a hard boundary, and **exactly one** of them is genuinely agentic (the crawler delegates open-ended page understanding to browser-use). The other stages are deterministic orchestration wrapped around bounded, single-purpose LLM calls.
+
+I think that is the right shape for this problem. I am not going to dress a chain of prompts up as an “autonomous agent.” Calling everything an agent is how you get systems nobody can debug.
+
+### 2.2 The five stages and their boundaries
+
+```mermaid
+flowchart TB
+  S1[1 Crawl\nroutes → Screens + Transitions]
+  S2[2 Ingest\ndocs → Requirements]
+  S3[3 Code\ntarball → RepoTree + Neo4j]
+  S4[4 Connect\nreqs + UI + files → edges + gaps]
+  S5[5 Reason\nPR + layers → verdict comment]
+
+  S1 --> S4
+  S2 --> S4
+  S3 --> S4
+  S1 --> S5
+  S2 --> S5
+  S3 --> S5
+  S4 -.->|improves| S5
+```
+
+*Figure 3 — Five stages. Connect improves the graph for absence queries; Reason today primarily reads SQLite digests + diff (see honesty notes below).*
+
+| # | Stage | Input → Output | Boundary (why it ends here) |
+|---|--------|----------------|------------------------------|
+| 1 | **Crawl** | route list → Screen + Transition records | Ends when each supplied URL (and expanded sidebar views) has one structured screen summary. No discovery beyond that. |
+| 2 | **Ingest** | doc URL / repo → `Requirement[]` | Ends when prose is split and each section is turned into testable requirements. |
+| 3 | **Code** | repo tarball → `RepoTree` + Neo4j code subgraph | Ends when AST + descriptions + structural / dependency / call edges are written. |
+| 4 | **Connect** | reqs + crawl + file paths → cross-layer edges + gaps | Ends when every requirement is linked or explicitly marked uncovered. **API built; dashboard button not wired yet.** |
+| 5 | **Reason** | PR diff + stored layers → blast-radius verdict | Ends when one validated verdict is upserted on the PR. |
+
+Stages 1–3 run from the dashboard (separate jobs/endpoints). Stage 5 is event-driven off the GitHub webhook. The boundaries are real because each stage **persists** its output to a store the next stage reads — they are not function calls chained only in memory. You can re-run stage 5 many times without re-crawling. That decoupling is the point: the expensive graph/tree is built once; reasoning is cheaper and repeatable.
+
+### 2.3 Deterministic vs LLM — the actual split
+
+This is the question that matters. Here is the real line, per stage:
+
+| Stage | Deterministic | LLM-driven | Why split there |
+|-------|---------------|------------|-----------------|
+| **Crawl** | URL normalisation, screen-id hashing, screen-relationship graph from hrefs (`_build_relationships`), screenshot download | Per-screen semantic read (title, label, purpose, actions, components) | Graph topology is a fact from links — never ask a model for something `urljoin` can compute. “What is this screen for” is judgement. |
+| **Ingest** | Fetch, markdown heading split (`_split_sections`), stable `R{n}` ids | Prose → `{user_action, expected_outcome}` requirements | Splitting on `#` headings is regex. Turning a paragraph into a testable requirement is judgement. |
+| **Code** | `ast.parse` → symbols, imports, call names; import resolution; all Neo4j edge writes (`CALLS`, `DEPENDS_ON`, …) | One structured call per file = file + symbol descriptions | The graph structure is compiler-grade fact from the Python AST. Only the natural-language description is LLM. The model never decides what calls what. |
+| **Connect** | All Cypher writes; absence computation (booleans + `CoverageGap`) | One call mapping each requirement → screens + files | Mapping “R3” to “the Balance screen” is semantic. The LLM only proposes links; writes only keep ids that exist in the provided lists. |
+| **Reason** | PR fetch, diff truncation, layer assembly, comment upsert | One call producing the blast-radius verdict | The verdict is the irreducible judgement. Everything feeding it and everything after it is deterministic. |
+
+**The principle, stated once:** the LLM decides links and language; Cypher and Python decide truth. Every LLM output is constrained (JSON / Pydantic) and validated; anything that references an id or path not in the input is dropped.
+
+### 2.4 Execution trace of the Reason stage
+
+The Reason stage is the most integrated path — event-driven, multi-system, with exactly one LLM call boxed in the middle.
 
 ```mermaid
 sequenceDiagram
-  participant FE as Next.js
+  participant GH as GitHub
   participant API as FastAPI
-  participant Mem as JobStore memory
+  participant Mem as Job / reason task
   participant DB as SQLite
-  participant Ext as GitHub / LLM / browser-use / Neo4j
+  participant LLM as LLM
 
-  FE->>API: POST /analyze (cookie)
-  API->>Mem: create job pending
-  API->>DB: insert jobs row
-  API-->>FE: {job_id}
-  API->>Ext: background run_analyze_job
-  loop every 1.5s
-    FE->>API: GET /jobs/{id}
-    API->>Mem: store.get
-    API-->>FE: progress / result
+  GH->>API: pull_request webhook (HMAC)
+  API->>Mem: asyncio.create_task(run_reason_job)
+  API-->>GH: 202 accepted
+  Mem->>DB: RepoContext.from_storage(full_name)
+  Mem->>GH: installation_token + fetch PR diff / files / issues
+  Mem->>Mem: assemble digests (reqs, screens, changed-file code, diff)
+  Mem->>LLM: one structured blast-radius call
+  LLM-->>Mem: PRVerdict JSON
+  Mem->>Mem: validate + render_comment (layer honesty footer)
+  Mem->>GH: upsert comment (<!-- tracegraph:begin -->)
+  Mem->>DB: save_pr_review
+```
+
+*Figure 4 — Reason stage. Everything before and after the single LLM arrow is deterministic: token minting, fetch, layer assembly, diff truncation, marker-based comment upsert.*
+
+### 2.5 Why this isn’t “a chain of prompts”
+
+Three concrete reasons:
+
+1. **The graph / tree is the system’s memory, and most of it is not LLM-authored.** Call graph, dependency graph, and inheritance edges come from `ast`, not a prompt. Reasoning over structure you can trust is what separates this from “summarise the diff.”  
+2. **The LLM is boxed.** Stages use bounded structured calls with schema validation and id-whitelisting. There is no free-roaming tool-use loop except inside browser-use, where open-ended page understanding is the actual job.  
+3. **Stages degrade independently.** Drop the LLM keys and you still get AST structure and screen-relationship edges from hrefs. Drop Neo4j and you still get a PR verdict off the diff + cached tree in SQLite. A brittle prompt chain falls over when any link is missing; this does not.
+
+**Honest cost of this shape:** there is no global planner. Nothing reflects on “did stage 3 produce enough for stage 5.” Stages are sequential and a bit dumb. For a time-boxed build that is the right trade — a planner is something I’d add only after eval exists to tell me it’s needed (see §8 / §10).
+
+---
+
+## 3. Pipeline deep dives
+
+### 3.1 Crawl pipeline (`crawler.py`)
+
+**How it starts.** Dashboard `LiveCrawl` → `POST /crawl` with `base_url`, `routes[]`, optional `login`, and `full_name`. FastAPI creates a crawl job and runs `run_crawl_job` in the background.
+
+**URL discovery.** User-supplied routes only (default `/`). We do **not** spider the open web. After a route capture, Streamlit-style **sidebar views** are expanded from labels the agent returns (`Navigate: …`), then captured as separate screens.
+
+**Page navigation & screenshots.** browser-use cloud runs a task prompt per route/view (“go to this URL, analyze only this page”). Screenshots come back as presigned URLs and are downloaded into data URIs for the live feed.
+
+**HTML / DOM.** We do not ship a full DOM dump pipeline in the current path. The agent returns a structured summary (`title`, `label`, `purpose`, `primary_actions`, `key_components`, `links`). Older schema fields from an earlier Playwright-era crawler still exist on `ScreenInfo` but are largely unused — called out as a gap in §9.
+
+**Relationships.** `_build_relationships` turns real `href`s into `Transition` edges between captured screens. If there are no link edges, `_build_sidebar_flow` chains screens in capture order.
+
+**Errors.** Per-route agent failures are logged and skipped; zero screens with errors fails the job; screens without images succeed with a `capture_note`. No automatic retry loop — re-run the job.
+
+**Output.** `CrawlResult` → SQLite `crawl_results` + `artifacts/<run_id>/manifest.json`. Live `on_screen` updates let the UI show screens as they arrive.
+
+### 3.2 Ingest pipeline (`ingest.py`)
+
+**Purpose.** Turn product docs into a **stable, QA-shaped list of requirements** — not a vector index.
+
+1. Fetch source (`github_repo` tarball `.md`/`.vdk`, README API, URL, or raw text).  
+2. Split on markdown headings.  
+3. Bounded concurrency: one LLM JSON call per section → `Requirement` (`title`, `description`, `user_action`, `expected_outcome`, `source_anchor`).  
+4. Assign `R1…Rn`.  
+5. Optional overview LLM call.  
+6. Persist `ingest_results`.
+
+**Why not embeddings?** PR review needs the same small structured list every time. Paying once at ingest and stuffing titles into the reason prompt is more controllable than nearest-neighbor chunks for this product question.
+
+### 3.3 Code / knowledge graph pipeline (`ast_parser.py`, `describer.py`, `graph.py`)
+
+1. Download GitHub tarball (Python files capped by settings).  
+2. `ast.parse` → `FileInfo` (imports, functions, classes, call names).  
+3. `describe_tree` — one LLM JSON description per file (bounded concurrency).  
+4. **Always** `save_repo_tree` to SQLite.  
+5. If `NEO4J_URI` is set: `DETACH DELETE` that repo’s prior subgraph, then MERGE structural and behavioural edges. Graph failures are soft-caught in the analyze job so the tree still lands in SQLite.
+
+**Neo4j is core to the graph feature** (this is how we *show* and query the repo as a graph). It is **soft-optional as a runtime dependency** so local demos and webhooks do not hard-fail when Aura is unset. For assignment demos, run with Neo4j configured and show the console queries.
+
+### 3.4 Connect layers (`graph_layers.py`)
+
+One LLM mapping call proposes `req → screens` and `req → files`. Cypher writes `SPECIFIES`, `HAS_SCREEN`, `NAVIGATES_TO`, `COVERED_BY`, `IMPLEMENTED_BY`, and `MISSING_UI_COVERAGE` for uncovered requirements. Only ids present in the input lists survive.
+
+**Status:** backend endpoint `POST /graph/connect` works. The dashboard does not call it yet. Labelled honestly in §9.
+
+### 3.5 Reason / report (`pr_review.py`, `github_app.py`)
+
+1. Webhook HMAC verify; accept `opened` / `reopened` / `synchronize` / `ready_for_review`.  
+2. `RepoContext.from_storage(full_name)` — newest tree / crawl / requirements (empty `user_id` path for webhooks).  
+3. Installation token → PR title, body, diff, changed files, linked issues.  
+4. Resolve tree (cached or live AST+describe on head).  
+5. Assemble one user message: requirements digest + crawl screens + changed-file code digest + graph summary/console URL + diff.  
+6. One LLM call → `PRVerdict`.  
+7. `render_comment` with layer honesty footer.  
+8. Upsert comment using `<!-- tracegraph:begin -->` … `<!-- tracegraph:end -->` so synchronize edits one comment instead of spamming.  
+9. `save_pr_review`.
+
+---
+
+## 4. Graph schema with justification
+
+### 4.1 Three layers in one per-repo subgraph
+
+Every node is namespaced by repo `full_name` (keys like `owner/repo:path` or `owner/repo::req::R3`). One Aura instance holds many repos as isolated subgraphs; rebuilding one `DETACH DELETE`s only that repo’s reachable nodes. That is the cheapest multi-tenant isolation on a shared free-tier instance.
+
+```mermaid
+flowchart TB
+  Repo[:Repo]
+
+  subgraph Code["Code layer"]
+    File[:File]
+    Fn[:Function]
+    Cls[:Class]
+    Lib[:Library]
   end
-  Ext-->>API: tree + optional graph
-  API->>DB: save_repo_tree
+
+  subgraph UI["UI layer"]
+    Screen[:Screen]
+  end
+
+  subgraph Req["Requirements layer"]
+    Requirement[:Requirement]
+    Gap[:CoverageGap]
+  end
+
+  Repo -->|CONTAINS| File
+  File -->|DEFINES| Fn
+  File -->|DEFINES| Cls
+  File -->|DEPENDS_ON| File
+  File -->|IMPORTS| Lib
+  Fn -->|CALLS| Fn
+  Repo -->|HAS_SCREEN| Screen
+  Repo -->|SPECIFIES| Requirement
+  Requirement -->|COVERED_BY| Screen
+  Requirement -->|IMPLEMENTED_BY| File
+  Requirement -->|MISSING_UI_COVERAGE| Gap
+  Screen -->|NAVIGATES_TO| Screen
 ```
 
-### Possible Founder Question
+*Figure 5 — Three-layer schema (simplified). Code edges are denser in Neo4j than this sketch; see tables below.*
 
-> Why did you choose a queue instead of processing synchronously?
+### 4.2 Node types
 
-**Suggested answer:** We did **not** choose a durable queue. Long work (AST+LLM, crawl, ingest, PR review) runs as fire-and-forget `asyncio` tasks so the HTTP handler returns a `job_id` in milliseconds and the UI polls. That keeps local setup to two processes (API + frontend) with no Redis/Celery. The cost is that live progress dies on API restart — called out in `jobs.py` and the README “Future Improvements.”
+| Layer | Node | Key fields | Source |
+|-------|------|------------|--------|
+| Code | `Repo` | `full_name`, `summary` | tarball / analyze |
+| Code | `File` | `path`, `loc`, `description`, `imports` | AST + describer |
+| Code | `Function` (`:Method` if on a class) | `name`, `args`, `calls`, `description` | AST |
+| Code | `Class` | `name`, `bases`, `description` | AST |
+| Code | `Library` | `name`, `external=true` | resolved imports |
+| Code | `Decorator` | `name` | AST |
+| UI | `Screen` | `url`, `title`, `label`, `authenticated` | crawl |
+| Req | `Requirement` | `req_id`, `title`, `user_action`, `expected_outcome`, coverage flags | ingest + connect |
+| Absence | `CoverageGap` | `reason` | connect |
+
+### 4.3 Edge types
+
+**Structure / behaviour (code):** `CONTAINS`, `DEFINES`, `HAS_METHOD`, `DEPENDS_ON`, `IMPORTS`, `USES`, `CALLS`, `INSTANTIATES`, `INHERITS_FROM`, `DECORATED_BY`.
+
+**Cross-layer:** `SPECIFIES`, `HAS_SCREEN`, `NAVIGATES_TO`, `COVERED_BY` (req→screen), `IMPLEMENTED_BY` (req→file), `MISSING_UI_COVERAGE` (req→gap).  
+**PLANNED — not built as a first-class edge yet:** `RENDERED_BY` (screen→file/component) for non-Python UIs.
+
+### 4.4 How absence is modelled — and why it is a node
+
+The brief calls this out, so it gets care. Absence is modelled three ways on purpose:
+
+1. **Boolean state on the requirement** — `covered_by_ui` / `implemented_in_code`. Absence is a property, queryable without traversal.  
+2. **A first-class `CoverageGap` node** + `(:Requirement)-[:MISSING_UI_COVERAGE]->(:CoverageGap)`. Absence becomes visible in the graph view and gives a place to attach a reason (and later severity/owner).  
+3. **Default-to-uncovered.** If the mapping LLM is absent or unsure, the requirement stays uncovered and gets a gap. Presence must be proven. A requirement is only “covered” if the model named a screen that actually exists in the crawl.
+
+**Why not just “a requirement with no `COVERED_BY` edge”?** Missing data and proven-absent look identical in that model — you cannot distinguish “we never ran the crawl” from “we crawled and the feature genuinely isn’t there.” Making the gap an explicit node lets the absence query return a row that means something *asserted*, and lets the report say “this requirement should be testable and isn’t” with a clearer story.
+
+### 4.5 Justify the schema against real queries
+
+**Query A — which intended behaviours have no way to be tested in the product as built?**
+
+```cypher
+MATCH (r:Requirement {full_name:$repo})-[:MISSING_UI_COVERAGE]->(:CoverageGap)
+RETURN r.req_id, r.title
+```
+
+One hop, index-friendly on `full_name`. Before a UI exists this returns (almost) everything; after a crawl + connect, it returns the short sharp list of requirements with no surfaced control.
+
+**Query B — if this file changes, which requirements lose coverage?**
+
+```cypher
+MATCH (f:File {key:$repo + ':' + $path})<-[:IMPLEMENTED_BY]-(r:Requirement)
+OPTIONAL MATCH (r)-[:COVERED_BY]->(s:Screen)
+RETURN r.req_id, r.title, collect(s.label) AS screens_that_test_it
+```
+
+Two hops from the changed file (what a PR gives you) out to impact. Edge directions were chosen for that fan-out.
+
+**Honesty about Reason today:** the shipping reason path assembles SQLite digests for the LLM rather than running these Cypher queries live. The schema and Connect API exist so those queries are real; wiring Reason to Cypher neighborhoods is a next step (§10), not something I will pretend is already in the hot path.
 
 ---
 
-# Task 2 — End-to-End Request Lifecycles
+## 5. Data flow by feature
 
-There is no single “crawl → embed → search → report” pipeline. There are **four** lifecycles that share SQLite.
-
-## 2.1 Analyze (code layer)
-
-```
-User clicks “Generate knowledge graph”
-  → FE startAnalyze({ full_name, ref, build_graph: true })
-  → POST /analyze
-  → create_analyze_job + asyncio.create_task(run_analyze_job)
-  → return job_id
-  → FE pollJob
-       │
-       ▼
-  run_analyze_job:
-    1. download_tarball (GitHub) — .py files capped by MAX_PYTHON_FILES / MAX_FILE_BYTES
-    2. build_tree — ast.parse per file → FileInfo (imports, functions, classes, calls)
-    3. describe_tree — one LLM JSON call per file (bounded by llm_concurrency)
-    4. build_knowledge_graph — Neo4j DELETE subgraph + MERGE passes (optional; errors soft-fail)
-    5. db.save_repo_tree — persist RepoTree JSON
-    6. JobState.done — FE shows GraphModal / tree
-```
-
-**Evidence:** `jobs.run_analyze_job` (lines 99–139), `github_fetch.download_tarball`, `ast_parser.build_tree`, `describer.describe_tree`, `graph.build_knowledge_graph`.
-
-## 2.2 Crawl (UI layer)
-
-```
-User submits base_url + routes (+ optional login)
-  → POST /crawl
-  → run_crawl_job
-       │
-       ▼
-  crawl_app:
-    if no BROWSER_USE_API_KEY → stub ScreenInfo list + capture_note
-    else Crawler.run:
-      for each route (concurrent, semaphore):
-        browser-use task prompt → structured _BUScreen
-        download_presigned_screenshot → data URI on ScreenInfo
-        extract sidebar view names → second-pass captures
-      build link Transitions (+ sidebar chain fallback)
-      write artifacts/<run_id>/manifest.json
-  on_screen callback updates status.crawl_result for live FE feed
-  db.save_crawl_result if full_name set
-```
-
-**Evidence:** `jobs.run_crawl_job`, `crawler.crawl_app` / `Crawler.run`, `screenshot.download_presigned_screenshot`, `frontend/components/dashboard/live-crawl.tsx`.
-
-## 2.3 Ingest (requirements layer)
-
-```
-User starts ingest (github_repo / readme / url / text)
-  → POST /ingest
-  → run_ingest_job → ingest_doc
-       │
-       ▼
-  fetch docs (tarball .md/.vdk OR README API OR URL OR raw text)
-  split on markdown headings
-  per section: LLM → Requirement{title, description, user_action, expected_outcome}
-  assign req_id R1..Rn
-  LLM product overview
-  db.save_ingest_result
-```
-
-**Evidence:** `ingest.ingest_doc`, `jobs.run_ingest_job`.
-
-**Not present after ingest:** embedding generation, vector upsert, chunk index.
-
-## 2.4 Reason / report (PR blast radius)
-
-```
-GitHub pull_request webhook (opened|reopened|synchronize|ready_for_review)
-  OR POST /reason { full_name, pr_number }
-  → run_reason_job
-       │
-       ▼
-  RepoContext.from_storage(full_name)  # newest tree/crawl/requirements; webhook has no user
-  installation_token(full_name)
-  fetch_pr_context (title, body, diff, changed files, linked issues)
-  review_pr:
-    resolve tree (cached or live AST+describe on head SHA)
-    assemble prompt: requirements digest + crawl screens + code digest of changed files + diff
-    LLM → PRVerdict JSON
-  render_comment (HTML comment markers for upsert)
-  upsert_pr_comment
-  db.save_pr_review
-```
-
-**Evidence:** `routes.github_webhook`, `jobs.run_reason_job`, `pr_review.review_pr` / `render_comment`.
-
-### Transition detail that interviewers probe
-
-| Transition | What actually moves |
-|------------|---------------------|
-| FE → API | JSON body + session cookie; no BFF except `GET /api/health` on Next |
-| API → “queue” | Task scheduled on the same event loop; no broker message |
-| Worker → Crawler | Direct `await crawl_app(...)` in the same process |
-| Crawler → Storage | In-memory `CrawlResult` then SQLite JSON; screenshots as data URIs in JSON (from presigned download), plus `manifest.json` on disk |
-| Ingest → “embeddings” | **Does not happen** |
-| KG → Retrieval | PR path does **not** run Cypher; it may attach `graph.console_url` to the comment |
-| Report → FE | FE reads stored reviews via `GET /repos/{full}/pulls/{n}`; does not trigger `/reason` itself |
-
-### Possible Founder Question
-
-> Walk me through what happens when a PR opens.
-
-**Suggested answer:** GitHub signs the webhook; we verify HMAC, ignore non-PR or closed actions, then spawn `run_reason_job`. That job uses the App installation token (not the user’s OAuth cookie), loads the latest analyze/crawl/ingest artifacts from SQLite for that `owner/repo`, pulls the diff, asks the LLM for a structured verdict, and upserts a single comment delimited by `<!-- tracegraph:begin -->` so re-syncs edit the same comment instead of spamming.
-
----
-
-# Task 3 — Deep Dive into Every Pipeline
-
-## 3.1 Crawl Pipeline
-
-### How crawling starts
-
-1. Dashboard `LiveCrawl` calls `startCrawl` → `POST /crawl` with `CrawlRequest` (`base_url`, `routes[]`, optional `login`, `full_name`).
-2. Route validates `base_url`, creates a crawl job, `asyncio.create_task(run_crawl_job)`.
-3. `crawl_app` creates `artifacts/<12-hex-id>/` and either stubs or constructs `Crawler`.
-
-### URL discovery
-
-**User-supplied routes only.** Default if empty: `[RouteSpec(path="/")]`.
-
-There is no sitemap spider and no “click every link to discover the site.” Links returned by the agent are used later to build **transitions between already-captured screens**, not to enqueue new URLs (`Crawler._build_relationships`).
-
-**Sidebar expansion (Streamlit-style SPAs):** After a route capture, `_extract_sidebar_views` parses `primary_actions` / `key_components` for “Navigate: …” / “sidebar” phrases, then `_crawl_sidebar_view` runs a second agent task per unique label.
-
-### Page navigation
-
-Delegated to **browser-use cloud** (`AsyncBrowserUse.run`). The task prompt tells the agent to go to the URL (optionally log in first) and **not** click into other pages (`_task_prompt`).
-
-Login credentials are interpolated into the natural-language prompt (`_login_prefix`). Selectors on `LoginConfig` are unused (schema comment: future structured auth).
-
-### Screenshot capture
-
-`res.screenshot_url` from browser-use → `download_presigned_screenshot` → stored on `ScreenInfo.screenshot_url` (typically a data URI for the FE live feed).
-
-### HTML extraction
-
-**Not a traditional HTML dump pipeline.** The agent returns structured fields via Pydantic `_BUScreen` (`title`, `label`, `purpose`, `primary_actions`, `key_components`, `links`). `structured_dom` is a small list of dicts with url/title/label — not a full DOM tree. Schema fields like `dom`, `a11y` exist on `ScreenInfo` but the crawler path shown does not populate full HTML/a11y dumps.
-
-### Error handling
-
-- Per-route agent failures: logged, appended to `route_errors`, that route returns `None` (`_run_browser_use`).
-- Zero screens + errors → `capture_note` = first error; job marked **error** in `run_crawl_job`.
-- Screens without any screenshot URLs → success with warning `capture_note`.
-- Missing API key → stub screens + note (job may still “succeed” with empty real capture depending on stub count).
-
-### Retry strategy
-
-**No automatic retry loop** in `crawler.py`. A failed `client.run` is skipped for that route/view. Concurrency is limited by `crawl_browseruse_concurrency`; cost capped by `crawl_agent_max_cost_usd` per run call.
-
-### Final output
-
-`CrawlResult`: `run_id`, `base_url`, `artifact_dir`, `screens[]`, `transitions[]`, `capture_note`. Persisted to SQLite when `full_name` is set; `manifest.json` written under the artifact dir.
-
-### Possible Founder Question
-
-> Why browser-use instead of Playwright scripts?
-
-**Suggested answer:** We need semantic labels (purpose, primary actions) and auth that varies per app, not just screenshots. An agent that follows a task prompt adapts to Streamlit sidebars and login flows without per-app selectors. Trade-off: cost, nondeterminism, and putting passwords in prompts (README lists structured crawl auth as future work).
-
----
-
-## 3.2 Ingestion Pipeline
-
-This is **requirements extraction**, not a RAG ingest.
-
-| Step | What | Why |
-|------|------|-----|
-| Fetch source | `github_repo` tarball `.md`/`.vdk`, or README API, or URL, or raw text | Get product intent from where teams already write it |
-| Split sections | Regex on `#` headings (`_split_sections`) | Bound LLM context; map `source_anchor` back to a heading |
-| Extract requirements | LLM JSON per section → `Requirement` | Turn prose into testable QA statements |
-| Assign IDs | `R1..Rn` | Stable handles for comments and Neo4j keys |
-| Overview | One LLM markdown summary | Human-readable product brief in the UI |
-| Persist | `ingest_results.result_json` | Webhook/reason can load without re-fetching docs |
-
-### What looks like “chunking” but is not RAG chunking
-
-Heading split exists so each LLM call sees one section (`body[:8000]`). There is **no** overlap strategy, **no** embedding model, **no** vector store write.
-
-### Progress / errors
-
-Progress callbacks update job message (`Extracted i/n sections`). Per-section LLM failure → warning + empty list for that section (ingest continues). No LLM keys → placeholder `Requirement` with title = heading only.
-
-### Possible Founder Question
-
-> Why not embed the docs and retrieve at PR time?
-
-**Suggested answer:** PR review needs a **stable, small, QA-shaped** requirements list every time — not nearest-neighbor chunks. We pay LLM cost once at ingest, store structured rows, and stuff titles into the review prompt. That is cheaper and more controllable than ANN retrieval for this product question.
-
----
-
-## 3.3 Knowledge Graph Pipeline
-
-### What the graph is
-
-A **Neo4j property graph** mirroring the Python AST + LLM descriptions, namespaced by `full_name` so multiple repos share one Aura instance safely (`graph.py` module docstring).
-
-### Entity extraction
-
-**Not NLP NER.** Entities come from `ast` parsing:
-
-- `Repo`, `File`, `Function`, `Class` (+ `Method` label), `Library`, `Decorator`
-- Optional later: `Requirement`, `Screen`, `CoverageGap` via `connect_layers`
-
-Symbols and call names are extracted in `core/tree.py` (`extract_symbols`, `extract_imports`) during `parse_file`.
-
-### Relationship extraction
-
-Resolved in `_build_payload` then written in Cypher passes:
-
-| Relationship | Meaning |
-|--------------|---------|
-| `CONTAINS` | Repo → File |
-| `DEFINES` | File → Function/Class |
-| `HAS_METHOD` | Class → Method |
-| `DEPENDS_ON` | File → File (internal import) |
-| `USES` | File → imported symbol |
-| `IMPORTS` | File → external Library |
-| `CALLS` | Function → Function (same-repo name match) |
-| `INSTANTIATES` | Function → Class |
-| `INHERITS_FROM` | Class → Class (or external stub) |
-| `DECORATED_BY` | Symbol → Decorator |
-
-Layer connect (separate API):
-
-| Relationship | Meaning |
-|--------------|---------|
-| `SPECIFIES` | Repo → Requirement |
-| `HAS_SCREEN` | Repo → Screen |
-| `NAVIGATES_TO` | Screen → Screen |
-| `COVERED_BY` | Requirement → Screen |
-| `IMPLEMENTED_BY` | Requirement → File |
-| `MISSING_UI_COVERAGE` | Requirement → CoverageGap |
-
-### Graph construction
-
-`build_knowledge_graph`:
-
-1. Skip if `NEO4J_URI` unset → `None`.
-2. `DETACH DELETE` prior subgraph for that repo.
-3. Run MERGE passes with parameterized `execute_query`.
-4. Return `GraphInfo` (counts, console URL, ready-made Cypher “dashboard” queries).
-
-### Storage
-
-- **Neo4j Aura** for the graph.
-- **SQLite `repo_trees.tree_json`** always holds the `RepoTree` (including nested `graph` metadata when built).
-
-### Graph traversal / querying
-
-- Ready-made Cypher strings in `GraphInfo.queries` for humans in Neo4j Browser.
-- **PR review does not traverse Neo4j.** It uses `_tree_digest` / `_graph_block` text in the LLM prompt (`pr_review.py`).
-
-### How the graph improves retrieval
-
-**Honest answer from code:** At PR time, the graph mainly contributes a **console link** and high-level counts in the prompt. Structural blast radius in the comment is inferred by the LLM from changed-file descriptions + UI/requirements digests, not from a Cypher neighborhood query.
-
-`connect_layers` *would* enable absence queries (requirements with `MISSING_UI_COVERAGE`), but the dashboard does not call `POST /graph/connect` today — only the backend endpoint and landing FAQ mention it.
-
-### Why a graph instead of only vector search
-
-1. Code relationships (calls, imports, inheritance) are **explicit edges**, not approximate similarity.
-2. Multi-repo tenancy on free Aura via key prefixes (`repo:path`).
-3. Product thesis: blast radius is a **graph question** (“what calls what / what screen / what requirement”), even if the first shipping review path is LLM-over-digests.
-
-Vectors would help “find similar docs”; they would not replace resolved `CALLS` / `DEPENDS_ON`.
-
-### Major data structures
-
-| Structure | Role |
-|-----------|------|
-| `RepoTree` / `FileInfo` / `FunctionInfo` / `ClassInfo` / `ImportInfo` | In-memory + SQLite code layer |
-| Neo4j node keys `full_name:path`, `full_name:path:fn` | MERGE identity |
-| `GraphInfo` | Write stats + console + sample queries |
-| `ScreenInfo` / `Transition` | UI layer graph (also in SQLite; optionally Neo4j Screens) |
-| `Requirement` | Requirements layer |
-| `RepoContext` | Bundle of tree/crawl/requirements for review |
-| `PRVerdict` | Structured report before markdown render |
-
-### Possible Founder Question
-
-> If PR review doesn’t query Neo4j, why bother writing it?
-
-**Suggested answer:** Two audiences. Engineers explore call/import structure in Aura with the shipped Cypher snippets. The bot needs a fast, restart-safe artifact path — SQLite digests — so webhooks don’t depend on Neo4j availability. Graph write is best-effort in analyze (`try/except` around `build_knowledge_graph`); losing Neo4j must not lose the tree.
-
----
-
-## 3.4 Search & Retrieval
-
-### Status: no search service
-
-There is no query parser, vector index, hybrid ranker, or search API.
-
-### What “retrieval” means in TraceGraph
-
-For **PR review** (`review_pr`):
-
-1. **Query processing** — N/A; input is PR metadata + diff from GitHub.
-2. **Load context** — `RepoContext.from_storage` / `from_request` reads SQLite.
-3. **Filter** — `_tree_digest` keeps only files in `pr.changed_files`; crawl/requirements truncated to ~40 items; diff truncated to `max_file_bytes`.
-4. **Knowledge graph usage** — optional text block with node/rel counts + console URL.
-5. **Ranking** — none; LLM is asked to produce the verdict structure.
-6. **Context assembly** — single user message string (`human` in `review_pr`).
-7. **Response generation** — `complete(..., json_mode=True)` → `PRVerdict` → `render_comment`.
-
-For **dashboard**, “get” endpoints return the latest stored JSON blobs (`GET /repos/{full}/tree|crawl|ingest`).
-
-### Possible Founder Question
-
-> How do you rank which context goes into the LLM?
-
-**Suggested answer:** Deterministic filters, not learned ranking: changed files only for code detail, caps on screens/requirements, hard truncate on diff. That keeps prompts bounded and reproducible. If we outgrow the context window, the next step would be graph neighborhood expansion around changed symbols — still not necessarily embeddings.
-
----
-
-# Task 4 — Data Flow by Feature
-
-## 4.1 GitHub OAuth login
+### 5.1 Analyze
 
 | | |
 |--|--|
-| **Input** | User clicks login |
-| **Processing** | `login_url` saves OAuth state; GitHub authorize; `handle_callback` exchanges code, upserts user, creates session |
-| **Output** | Redirect to FE `/auth/callback` with `tracegraph_session` HttpOnly cookie |
-| **DB writes** | `oauth_states`, `users`, `oauth_accounts`, `sessions` |
-| **DB reads** | state pop, later session on each authed request |
-| **External** | `github.com/login/oauth/*`, `api.github.com/user` |
-| **Workers** | none |
+| **Input** | `{ full_name, ref, build_graph }` + user OAuth token |
+| **Processing** | tarball → AST → LLM describe → Neo4j MERGE |
+| **Output** | `RepoTree` on the job + UI graph/tree views |
+| **Writes** | `jobs`, `repo_trees`; Neo4j nodes/edges |
+| **External** | GitHub tarball, LLM, Neo4j |
 
-## 4.2 List / track repos
-
-| | |
-|--|--|
-| **Input** | Authed dashboard |
-| **Processing** | `github_repos` uses user OAuth token |
-| **DB** | `tracked_repos` on track/untrack |
-| **External** | GitHub repos API |
-
-## 4.3 Analyze
-
-| | |
-|--|--|
-| **Input** | `{ full_name, ref, build_graph }` + user token |
-| **Processing** | tarball → AST → LLM describe → Neo4j |
-| **Output** | `JobStatus.result: RepoTree`; UI graph modal |
-| **DB writes** | `jobs`, `repo_trees` |
-| **DB reads** | job updates |
-| **External** | GitHub tarball, LLM providers, Neo4j |
-| **Workers** | `run_analyze_job` task |
-| **Events** | none (no event bus); FE polls |
-
-## 4.4 Crawl
+### 5.2 Crawl
 
 | | |
 |--|--|
 | **Input** | `base_url`, routes, optional login, `full_name` |
-| **Processing** | browser-use runs; live `on_screen` |
-| **Output** | `CrawlResult` |
-| **DB writes** | `jobs`, `crawl_results` |
-| **Disk** | `artifacts/<run_id>/manifest.json` |
-| **External** | browser-use API (+ screenshot CDN) |
-| **Workers** | `run_crawl_job` |
+| **Processing** | browser-use per route/view; build transitions |
+| **Output** | `CrawlResult` + live screen feed |
+| **Writes** | `jobs`, `crawl_results`; disk `artifacts/` |
+| **External** | browser-use API |
 
-## 4.5 Ingest
+### 5.3 Ingest
 
 | | |
 |--|--|
 | **Input** | `source`, `source_type`, token as needed |
-| **Processing** | fetch → sections → LLM requirements → overview |
-| **Output** | `IngestResult` |
-| **DB writes** | `jobs`, `ingest_results` |
-| **External** | GitHub and/or HTTP + LLM |
+| **Processing** | fetch → section split → LLM requirements → overview |
+| **Writes** | `jobs`, `ingest_results` |
+| **External** | GitHub / HTTP + LLM |
 
-## 4.6 Connect layers (API-only today)
-
-| | |
-|--|--|
-| **Input** | `POST /graph/connect` with optional inline tree/crawl/requirements |
-| **Processing** | LLM maps req→screens/files; Neo4j MERGE |
-| **Output** | counts + `absence_query` Cypher string |
-| **FE** | **does not call this** (as of current `lib/api.ts`) |
-
-## 4.7 PR reason / report
+### 5.4 Reason
 
 | | |
 |--|--|
 | **Input** | Webhook payload or `POST /reason` |
 | **Processing** | load context → fetch PR → LLM verdict → markdown |
-| **Output** | GitHub PR comment URL; stored review |
-| **DB writes** | `pr_reviews`; reads `repo_trees` / `crawl_results` / `ingest_results` |
-| **External** | GitHub App APIs + LLM |
-| **Events** | GitHub `pull_request` / `installation` / `ping` |
+| **Output** | GitHub PR comment |
+| **Writes** | `pr_reviews`; reads the three artifact tables |
+| **External** | GitHub App + LLM |
 
 ---
 
-# Task 5 — Architecture Decisions
+## 6. Confidence handling under ambiguity
 
-## D1 — In-process jobs instead of Redis/Celery
+### 6.1 What’s actually built
 
-| | |
-|--|--|
-| **Why** | Local DX: two processes; README states this explicitly |
-| **Alternatives** | Celery/RQ, cloud queues, separate worker containers |
-| **Pros** | Simple, no infra, shared memory for live crawl feed |
-| **Cons** | Progress lost on restart; no horizontal worker scale; one heavy crawl can starve the API event loop |
-| **Interview line** | “Optimize for explainability and install friction first; durable queue is listed as future work.” |
+Numeric confidence and an automated human-in-the-loop stop are **NOT built**. I am not going to pretend otherwise. What exists today is structural and conservative:
 
-## D2 — SQLite as artifact source of truth
+1. **Absence-as-default (§4.4).** When the agent can’t map a requirement to a screen, it doesn’t guess — it records a gap (when Connect runs). Ambiguity resolves toward “uncovered,” which is the safe direction for a risk tool.  
+2. **Id / path whitelisting.** A cross-layer link only survives if the screen/file it names exists in the input (`graph_layers.py`). The model cannot express false confidence in a thing that isn’t there.  
+3. **Layer-presence honesty in the output.** The PR comment footer states which of the three layers actually informed it (`render_comment`: ✅ / ⚪). A non-engineer can see what the system was blind to. That is the most important “confidence” signal in the product right now.  
+4. **Prompt-level honesty + coarse risk.** The reasoner is told not to invent links; the verdict carries `risk: low|medium|high`.  
+5. **Graceful degradation.** No key / no graph / no crawl never crashes the webhook path — it produces a narrower report that admits its narrowness.
 
-| | |
-|--|--|
-| **Why** | Webhooks have no user session; need durable latest tree/crawl/ingest per repo (`storage.py` header comment) |
-| **Alternatives** | Postgres, S3-only blobs, Neo4j-only |
-| **Pros** | Zero ops locally; JSON flexibility while schema evolves |
-| **Cons** | Single-node; large screenshot data URIs in JSON can bloat DB |
-| **Interview line** | “Neo4j is the exploration graph; SQLite is what the bot actually reads.” |
+So the current answer to “what happens when it isn’t sure” is: **widen the gap set, narrow the claim, and tell the reader what it couldn’t see.** Defensible for v1. It does **not** quantify uncertainty or pause for a human.
 
-## D3 — Optional Neo4j, soft-fail on graph errors
+### 6.2 PLANNED — not built
 
-| | |
-|--|--|
-| **Why** | Analyze must still produce a usable tree for PR review |
-| **Evidence** | `run_analyze_job` catches graph exceptions and continues |
-| **Trade-off** | Teams without Aura still get value; graph features degrade gracefully |
+The right design, scoped out for time:
 
-## D4 — LLM provider fallback chain
+- A numeric confidence per cross-layer edge = f(model self-rating, name-match strength, agreement across N sampled mappings). Store it on the edge.  
+- Three stop conditions that route to a human review queue instead of auto-posting: (a) high-risk verdict on a file tied to many requirements; (b) “covered” below confidence threshold; (c) changed function that maps to no file node.  
+- Surface confidence as a **band** in the report (“high / needs a human”), not a fake-precise decimal.
 
-| | |
-|--|--|
-| **Why** | Resilience and key availability (`complete` tries GLM → Groq → Gemini) |
-| **Cons** | Behavior can differ slightly across providers; debugging “which model answered” needs logs |
-
-## D5 — GitHub OAuth + separate GitHub App
-
-| | |
-|--|--|
-| **Why** | OAuth cannot reliably post as a bot on arbitrary repos; App installation tokens + webhooks are the GitHub-native path |
-| **Trade-off** | Two install concepts confuse users (Track vs App) — product copy must stay clear |
-
-## D6 — Upsert PR comment via HTML markers
-
-| | |
-|--|--|
-| **Why** | `synchronize` would spam threads without idempotent edit (`MARK_BEGIN` / `MARK_END`) |
-| **Alternative** | Check-runs / status API — richer UX, more App permissions |
-
-## D7 — User-supplied crawl routes (not open-world crawl)
-
-| | |
-|--|--|
-| **Why** | Cost control with browser-use; focus on known product surfaces |
-| **Cons** | Misses unknown pages; depends on user diligence |
-
-## D8 — Python-only AST analyze
-
-| | |
-|--|--|
-| **Why** | Current parser is `ast` (`ast_parser.py`); tarball filter keeps `.py` |
-| **Honest limit** | Non-Python monorepos get weak code layer; say this in interviews |
-
-## D9 — Prompt-assembled review vs graph query
-
-| | |
-|--|--|
-| **Why** | Ship a useful comment with partial layers; avoid Neo4j as runtime dependency for webhooks |
-| **Future** | Neighborhood Cypher around changed symbols + `connect_layers` absence checks |
+I’d only build this after §7 (eval), because without eval I can’t calibrate a threshold and would just be inventing numbers.
 
 ---
 
-# Task 6 — Interview Pack (quick fire)
+## 7. Eval approach
 
-### Q: What is TraceGraph?
+**Honest status: no eval harness is built.** This is a real gap. Here is how I’d know the output is right — including the “100 runs” answer.
 
-**A:** A FastAPI + Next.js product that builds code, UI, and requirements views of a repo and posts QA-oriented blast-radius comments on GitHub PRs.
+### 7.1 The core problem
 
-### Q: Where does state live?
+Stages Crawl, Ingest, Connect, and Reason each contain LLM calls. Re-run 100× on the same PR:
 
-**A:** Auth + artifacts + PR reviews in SQLite; live job progress in process memory; optional Neo4j for code/layer graphs; crawl manifests under `artifacts/`.
+- **Structure** (AST graph, screen-relationship graph from hrefs) is bit-identical — `ast` and `urljoin`.  
+- **Descriptions, requirement phrasings, cross-layer links, and verdicts will drift.**
 
-### Q: How do jobs work?
+Eval must treat those halves differently.
 
-**A:** `POST` creates a row + memory status, schedules `asyncio.create_task`, returns `job_id`; UI polls `GET /jobs/{id}` every 1.5s until `done`/`error`.
+### 7.2 Two-tier eval
 
-### Q: What happens if the API restarts mid-job?
+**Tier 1 — deterministic invariants (must hold every run, asserted in CI):**
 
-**A:** In-memory job disappears → poll 404. SQLite may have partial job row; completed artifacts already saved remain. Documented intentional local/dev trade-off.
+- AST node/edge counts stable for a fixed commit.  
+- Every `COVERED_BY` / `IMPLEMENTED_BY` edge points at an id that exists.  
+- Absence complete: `count(uncovered) + count(covered) == count(requirements)`.  
+- Verdict validates against `PRVerdict`; required fields present.
 
-### Q: How does the crawler handle auth?
+These catch the failures that actually break the product (broken graph, hallucinated ids, malformed output).
 
-**A:** If a route is `authenticated` and `login` is provided, the agent prompt includes login URL/username/password. No selector-based form fill yet.
+**Tier 2 — judgement quality (LLM outputs):**
 
-### Q: Does the knowledge graph power the PR bot?
+- A small **golden set** of real PRs with hand labels (e.g. UI-only redesign → UI + flows at risk, engine requirements untouched).  
+- Metric: set-level precision/recall of `requirements_at_risk` and `ui_at_risk` vs golden labels. **Absence recall** is the headline number (false negatives are the dangerous failure).  
+- **Stability under resampling (the 100-runs answer):** run each input N=10 times; report agreement rate per field (e.g. “R3 flagged in 9/10 runs”). High-agreement claims are trustworthy; low-agreement claims are exactly what §6’s confidence band should down-rank. Which runs are “correct” = match golden labels; which claims are trustworthy = stable across resamples. Those are two different questions.  
+- LLM-as-judge for description/verdict readability on a rubric, with human spot-checks.
 
-**A:** Indirectly. The bot’s primary inputs are SQLite digests + diff. Neo4j is written for exploration and future layer linking; review may only cite the console URL.
+### 7.3 What I would not claim
 
-### Q: Is there a vector database?
-
-**A:** No. Do not invent one in the interview.
-
-### Q: What would you build next?
-
-**A:** Align with README: durable job queue; structured crawl auth; shared FE auth context; split `storage.py` by domain; wire `/graph/connect` into the dashboard and optionally feed absence edges into `review_pr`.
+I would not report a single accuracy number off one repo and call it validated. The system isn’t proven until the golden set spans several apps — including a JS/TS frontend (which needs the web AST work in §10).
 
 ---
 
-# Appendix A — Excalidraw recipe
+## 8. Architecture decisions (engineering reasoning)
 
-Draw left-to-right:
+| Decision | Why this approach | Alternatives | Trade-off |
+|----------|-------------------|--------------|-----------|
+| **SQLite as bot source of truth** | Webhooks have no user session; need durable latest artifacts per repo | Postgres; Neo4j-only; frontend DB | Simple locally; JSON blobs (screenshots) can grow |
+| **In-process asyncio jobs** | Two-process local setup; no Redis in 16h | Celery / RQ / cloud queues | Progress lost on restart; no horizontal workers |
+| **Neo4j soft-optional write** | Graph explore is core; PR path must survive Aura down | Hard-require Neo4j | Reason doesn’t Cypher-traverse yet |
+| **Fixed crawl routes** | Reproducible, budget-safe, low hallucination | Autonomous click-spider | Misses unknown pages |
+| **browser-use cloud** | Semantic labels without maintaining a browser harness | Self-hosted Playwright + LLM | Less raw DOM/a11y control |
+| **Structured requirements, not RAG** | Stable QA list every PR | Embeddings + vector search | No semantic wiki search |
+| **Python AST first** | Depth on the graph in limited time | Multi-language parsers day one | JS/TS UIs don’t fully close code↔screen |
+| **OAuth + separate GitHub App** | Correct GitHub model for comments/webhooks | OAuth-only bot | Two install concepts for users |
+| **Upsert comment markers** | `synchronize` would spam threads | Check runs / status API | Markers are a bit crude but work |
 
-1. **Next.js UI**
-2. Arrow “cookie session” → **FastAPI**
-3. From FastAPI four downward arrows: **Analyze**, **Crawl**, **Ingest**, **Reason**
-4. Analyze → **GitHub tarball**, **AST**, **LLM**, **Neo4j**
-5. Crawl → **browser-use**, **artifacts/**
-6. Ingest → **Docs**, **LLM requirements**
-7. Reason → **GitHub App comment**
-8. All three prep jobs → cylinder **SQLite**
-9. Webhook cloud → Reason
+---
 
-Labels on SQLite: `repo_trees`, `crawl_results`, `ingest_results`, `pr_reviews`, `sessions`.
+## 9. Scope decisions
 
-## Appendix B — File index
+The brief is explicit that honest scoping beats polished hand-waving.
 
-| Concern | Path |
-|---------|------|
-| App entry | `backend/src/main.py` |
-| Job routes / webhook | `backend/src/api/routes.py` |
-| Auth routes | `backend/src/api/auth.py` |
-| Repo routes | `backend/src/api/repos.py` |
-| Jobs | `backend/src/services/jobs.py` |
-| Storage schema | `backend/src/services/storage.py` |
-| Crawl | `backend/src/services/crawler.py` |
-| Ingest | `backend/src/services/ingest.py` |
-| Code graph | `backend/src/services/graph.py` |
-| Layer connect | `backend/src/services/graph_layers.py` |
-| PR review | `backend/src/services/pr_review.py` |
-| GitHub App | `backend/src/services/github_app.py` |
-| LLM | `backend/src/core/llm.py` |
-| Schemas | `backend/src/models/schemas.py` |
-| FE API client | `frontend/lib/api.ts` |
-| Repo dashboard | `frontend/app/dashboard/[owner]/[repo]/page.tsx` |
+### 9.1 What I went deep on
+
+**The Code layer + knowledge graph (deepest).** Full Python `ast` parse → functions / classes / methods / imports, then resolved edges: internal imports → `DEPENDS_ON`, imported symbols → `USES`, call names → in-repo `CALLS`, plus `INSTANTIATES` / `INHERITS_FROM` / `DECORATED_BY`. This is compiler-grade structure, not LLM guesswork. Per-repo namespacing, idempotent MERGE writes, and ready-made connector queries live here. I invested here because **the graph is the system’s memory** — if it’s soft, everything downstream is soft.
+
+**The Reason stage + real GitHub integration (deep).** Working GitHub App: JWT → installation token → fetch PR diff + linked issues → reason across stored layers → upsert a single self-updating comment. Runs on real PRs. Output framed for a non-engineer (UI at risk / flows affected / requirements losing coverage) with explicit layer honesty.
+
+### 9.2 What I went medium on
+
+**Ingest / Requirements.** Deterministic heading-split + one bounded LLM call per section into testable `{user_action, expected_outcome}`, plus a whole-doc overview. Solid, but granularity follows the doc’s headings — no merging of duplicates across sections, no priority inference.
+
+**Crawl / UI.** Working browser-use path with live progress and sidebar expansion. Intentionally not an autonomous explorer.
+
+### 9.3 What I cut, and why
+
+| Cut | Why |
+|-----|-----|
+| Autonomous crawl | Fixed route list is reproducible and low-hallucination; open-world clicking burns budget and invents state |
+| Self-hosted Playwright DOM dumps | Outsourced to browser-use for semantic summaries in limited time |
+| Durable job queue | Local two-process DX first; flagged in README as future work |
+| Vector / RAG stack | Wrong abstraction for “stable requirements list” |
+| Numeric confidence + HITL | Needs eval first (§7) or thresholds are fiction |
+| Dashboard wiring for `/graph/connect` | API exists; UI not connected — honest gap |
+| JS/TS frontend AST | Second build; see §10 |
+
+### 9.4 Gaps I found while writing this
+
+1. **Reason does not yet run the absence Cypher query in the hot path** — it uses SQLite digests + LLM. Schema supports the query; product path should grow into it.  
+2. **Crawler schema drift** — `ScreenInfo` still carries older Playwright-era fields the current crawler doesn’t populate. Dead contract / cleanup owed.  
+3. **Code↔UI linking depends on UI language** — Python Streamlit UIs close the loop in the same AST; a normal React app falls back to joining through Requirements until a web AST exists.  
+4. **Cross-layer mapping is one LLM call** — no resampling/voting, so a single bad mapping is unguarded when Connect runs.  
+5. **In-memory job store** — fine for demo; needs Redis (or similar) to scale.
+
+I’d rather hand you this list than have you find it.
+
+---
+
+## 10. What I’d build with another week — top 3, in order
+
+### 10.1 Wire Connect into the dashboard and feed absence into Reason — highest product value
+
+Finish the three-layer loop the brief asks for in the UI operators actually use. Then have Reason optionally pull `MISSING_UI_COVERAGE` rows into the prompt (or cite them deterministically in the comment). This turns absence from “schema we can query in Neo4j Browser” into “something the PR comment always sees.”
+
+### 10.2 An eval harness with an LLM judge — unblocks everything else
+
+Build §7: Tier-1 invariants in CI, small golden set, precision/recall on at-risk fields, N-run agreement metric, LLM-as-judge on readability with human spot-checks. Second because without numbers I can’t honestly tune confidence (§6.2) or claim quality.
+
+### 10.3 A web-app AST (HTML/JS/TS) so Code and UI connect on real customer apps
+
+Today the loop closes cleanly when the UI is Python. Point TraceGraph at a normal React app and “this code change touches that screen” weakens. A tree-sitter (or similar) frontend layer → `(:Screen)-[:RENDERED_BY]->(:Component)` makes blast radius end-to-end regardless of UI language. Third only because Connect+eval make the current Python path trustworthy first; then expand languages.
+
+**Honorable mention:** durable job queue once the product is worth operating beyond a laptop.
+
+---
+
+## Appendix A — Stack & responsibility map
+
+| Concern | Where | Det / LLM |
+|---------|-------|-----------|
+| Crawl a live app | `crawler.py` → browser-use cloud | LLM (browse) + Det (graph) |
+| Screen-relationship graph | `crawler.py::_build_relationships` | Det |
+| Parse a spec → requirements | `ingest.py` | Det split + LLM extract |
+| Python AST → `RepoTree` | `ast_parser.py`, `core/tree.py` | Det |
+| File/symbol descriptions | `describer.py` | LLM |
+| Code subgraph → Neo4j | `graph.py` | Det |
+| Connect 3 layers + absence | `graph_layers.py` | Det writes + 1 LLM map |
+| PR blast-radius reasoning | `pr_review.py` | 1 LLM |
+| GitHub App auth + comment | `github_app.py` | Det |
+| Orchestration / jobs | `jobs.py`, `api/routes.py` | Det |
+| Persistence | `storage.py` (SQLite) | — |
+| Dashboard | `frontend/` | polls API |
+
+---
+
+## Appendix B — Sample output
+
+See [`sample_output.md`](./sample_output.md) for a real TraceGraph PR comment (UI polish PR: screens/flows at risk, requirements losing coverage none, suggestions included, layer honesty footer).

@@ -1,99 +1,132 @@
-# TraceGraph — Architecture Overview
+# TraceGraph — Overview
 
-Interview-ready map of the system. Deep dives, data flows, and decision trade-offs live in [`system_design.md`](./system_design.md). Scope honesty (what we did *not* build) lives in [`eval_and_scope.md`](./eval_and_scope.md).
+**For non-technical readers, founders, and anyone who wants the story before the code.**
 
-## One-sentence pitch
+TraceGraph helps a QA lead answer one question when a pull request lands:
 
-TraceGraph connects a GitHub repo’s **code AST**, **live UI crawl**, and **docs-as-requirements**, then comments on PRs with blast radius in plain language for a QA lead.
+> *What product behavior might this change break?*
 
-## Excalidraw / whiteboard boxes
+Code review tools show the diff. They do not show which screens, user flows, or product requirements are at risk. TraceGraph connects those dots and posts a plain-language comment on the GitHub PR.
 
-Use these exact names when redrawing:
+Technical design (full depth): [`system_design.md`](./system_design.md)  
+What we cut and how we’d evaluate: [`eval_and_scope.md`](./eval_and_scope.md)  
+Example PR comment: [`sample_output.md`](./sample_output.md)
 
-```
-[Next.js UI] --cookie session--> [FastAPI]
-                                      |
-          +------------+--------------+--------------+---------------+
-          |            |              |              |               |
-    [Analyze Job] [Crawl Job]  [Ingest Job]  [Reason Job]   [Auth/Repos]
-          |            |              |              |               |
-     [GitHub API] [browser-use]  [GitHub API]  [GitHub App]    [SQLite]
-     [AST+LLM]    [artifacts/]   [LLM reqs]    [PR comment]
-     [Neo4j]                                     ^
-                                                 |
-                                      [GitHub Webhook]
-```
+---
 
-## Mermaid — system context
+## The idea in one picture
 
 ```mermaid
 flowchart LR
-  User([User]) --> FE[Next.js Frontend]
-  FE -->|credentials include cookie| API[FastAPI Backend]
-  GHUser[GitHub OAuth] --> API
-  GHApp[GitHub App + Webhooks] --> API
-  API --> SQLite[(SQLite)]
-  API --> Neo4j[(Neo4j Aura optional)]
-  API --> BU[browser-use Cloud]
-  API --> LLM[LLM GLM / Groq / Gemini]
-  API --> GHAPI[GitHub REST API]
-  API -->|PR comment| GHApp
+  subgraph Prep["Build once from the dashboard"]
+    Code["Code map"]
+    UI["Screen map"]
+    Spec["Requirements"]
+  end
+
+  PR["A pull request opens"]
+  Bot["TraceGraph reads all three + the diff"]
+  Out["Comment on GitHub:\nwhat’s at risk"]
+
+  Code --> Bot
+  UI --> Bot
+  Spec --> Bot
+  PR --> Bot
+  Bot --> Out
 ```
 
-## Mermaid — three layers → PR comment
+You prepare three views of the product. When someone opens a PR, the bot uses those views plus the code diff to write a blast-radius report a non-engineer can read.
+
+---
+
+## Full system architecture
+
+This is the diagram we designed for the product — the same one in the README.
+
+![TraceGraph architecture](./architecture.png)
+
+**How to read it without being an engineer:**
+
+1. **Left side** — You use the TraceGraph website (Next.js), or GitHub sends a “PR raised” signal.  
+2. **Middle** — Our server (FastAPI) runs three prep jobs when you ask it to:  
+   - **Knowledge graph** — understand the code (and store a graph in Neo4j)  
+   - **Ingest** — read product docs into requirements  
+   - **Live crawl** — visit the live app with a browser agent  
+3. **SQLite** — the shared notebook where those three results are saved.  
+4. **Bottom** — when a PR arrives, we load that notebook + the PR diff, ask an AI for blast radius, and post a **TraceGraph comment** on the PR.
+
+One sentence: **the dashboard builds memory; the webhook uses that memory to comment on PRs.**
+
+---
+
+## The three views (in plain language)
+
+| View | Plain meaning | How we get it |
+|------|---------------|---------------|
+| **Code** | How the software is built — files, functions, what calls what | Download the GitHub repo, parse Python, describe it in English, draw relationships in Neo4j |
+| **UI** | What users actually see — screens and how they link | Point a browser agent at your live app’s URLs |
+| **Requirements** | What the product was *meant* to do | Read the docs / README and turn them into testable requirements |
+
+Think of it like a map with three layers. The PR is a pin on the map. The bot tells you which neighborhoods that pin touches.
+
+---
+
+## What you do in the product (operator journey)
 
 ```mermaid
-flowchart TB
-  subgraph prep [One-time / on-demand prep]
-    A[POST /analyze] --> AST[AST + LLM describe]
-    AST --> T[(repo_trees)]
-    AST --> N[(Neo4j code graph)]
-    C[POST /crawl] --> BU[browser-use]
-    BU --> CR[(crawl_results)]
-    I[POST /ingest] --> DOC[docs → requirements]
-    DOC --> IR[(ingest_results)]
-  end
-  subgraph pr [On PR opened / synchronize]
-    WH[Webhook or POST /reason] --> CTX[RepoContext from SQLite]
-    CTX --> REV[review_pr LLM]
-    REV --> CM[upsert_pr_comment]
-  end
-  T --> CTX
-  CR --> CTX
-  IR --> CTX
+flowchart LR
+  A[Sign in with GitHub] --> B[Install the TraceGraph App]
+  B --> C[Open a repo]
+  C --> D[Generate code map]
+  C --> E[Ingest docs]
+  C --> F[Crawl live app]
+  D --> G[Open or update a PR]
+  E --> G
+  F --> G
+  G --> H[Read the blast-radius comment]
 ```
 
-## Component cheat sheet
+1. **Sign in** with GitHub.  
+2. **Install** the TraceGraph GitHub App on the repos you care about (this is what lets the bot comment — different from just logging in).  
+3. Open a repo in the dashboard.  
+4. **Generate the knowledge graph** (code map).  
+5. **Ingest docs** into requirements.  
+6. **Crawl** the live app (you give a base URL and the routes that matter).  
+7. Open or push to a **pull request** — TraceGraph comments with UI at risk, flows affected, and requirements that may lose coverage.
 
-| Box | Role | Key files |
-|-----|------|-----------|
-| Next.js UI | Dashboard, job polling, modals | `frontend/app/dashboard/**`, `frontend/lib/api.ts` |
-| FastAPI | Thin routes; spawns jobs | `backend/src/api/routes.py`, `main.py` |
-| JobStore | In-memory live progress + SQLite metadata | `backend/src/services/jobs.py` |
-| SQLite | Source of truth for artifacts + auth | `backend/src/services/storage.py` |
-| Neo4j | Optional code (+ layer-connect) property graph | `graph.py`, `graph_layers.py` |
-| browser-use | Cloud browser agent for UI screens | `crawler.py` |
-| LLM | Descriptions, requirements, PR verdict | `core/llm.py` |
-| GitHub OAuth | User login + repo token | `services/auth.py` |
-| GitHub App | Installation token, webhooks, PR comments | `github_app.py` |
+You can skip a prep step. The comment still posts, but it is thinner. The footer of the comment shows which layers were available (so nobody is fooled into thinking the bot saw everything).
 
-## Happy path (what you say out loud)
+---
 
-1. Sign in with GitHub OAuth → `tracegraph_session` cookie on the API origin.
-2. Install the GitHub App on the org/repos you care about.
-3. On a repo page: **Generate knowledge graph** (`/analyze`), **Ingest docs** (`/ingest`), **Crawl** (`/crawl` with base URL + routes).
-4. Open or push to a PR → webhook → `run_reason_job` → blast-radius comment (~1–3 min, LLM-bound).
+## What the PR comment looks like (conceptually)
 
-## Critical interview facts
+The bot does **not** dump raw code. It writes sections a QA lead cares about:
 
-- **No Redis/Celery.** Jobs are `asyncio.create_task` inside the API process. Restart kills live poll state (`jobs.py` docstring).
-- **No vector search.** Retrieval for PR review is “load newest SQLite artifacts + truncate diff + one LLM call.”
-- **Neo4j is optional.** Analyze still saves the tree to SQLite if Neo4j fails or is unset.
-- **OAuth ≠ App.** OAuth reads the user’s repos; the App posts comments and receives webhooks.
-- **Track ≠ Install.** “Track” is a favorites list in SQLite; App install is what enables PR comments.
+- Overall verdict and risk level  
+- **UI at risk** — which screens may break  
+- **Flows affected** — which user journeys move  
+- **Requirements losing coverage** — what was intended but may no longer be testable / covered  
+- **What changed** — in product language  
+- **Suggestions** — practical next checks  
 
-## Possible Founder Question
+A real example lives in [`sample_output.md`](./sample_output.md).
 
-> Why three separate pipelines instead of one “index the repo” job?
+---
 
-**Suggested answer:** Different inputs and failure modes. Code needs a tarball + AST; UI needs a live URL and a browser agent; requirements need docs. Separating them lets a team ship PR review with only code+diff, then deepen coverage as crawl/ingest complete — the README’s explicit trade-off.
+## What TraceGraph is not
+
+- Not a replacement for unit tests or full E2E suites  
+- Not a “click every link on the internet” crawler (you choose the routes — on purpose, for trust and cost)  
+- Not magic that understands every programming language equally (code understanding today is strongest on Python)
+
+It is a **testing-intelligence assistant**: connect intent, UI, and code, then explain PR impact in product language.
+
+---
+
+## Who should read what next
+
+| You are… | Read next |
+|----------|-----------|
+| Founder / PM | Stay here, then skim scope in [`eval_and_scope.md`](./eval_and_scope.md) |
+| QA lead | [`sample_output.md`](./sample_output.md), then try the dashboard |
+| Engineer / interviewer | [`system_design.md`](./system_design.md) — full pipelines, graph schema, trade-offs |

@@ -6,6 +6,10 @@ It is a FastAPI + Next.js app: you connect a GitHub repo, run analyze / crawl / 
 
 ---
 
+# Architecture
+
+![TraceGraph architecture](./architecture.png)
+
 # Why We Built This
 
 Code review tools are good at diffs. They are weak at answering the question a QA lead actually asks: *what product behavior does this PR touch?*
@@ -17,10 +21,6 @@ We started with AST → Neo4j for the code layer. That answered “what calls wh
 Trade-off we accepted: the system is strongest when you have run all three pipelines for a repo. Without crawl or ingest, the bot still reviews from code + diff — thinner, but still useful. We chose fire-and-forget background jobs over a worker queue so local setup stays two processes (API + frontend), not Redis/Celery.
 
 ---
-
-# Architecture
-
-![TraceGraph architecture](./architecture.png)
 
 **Frontend** — dashboard, job progress, screen graph, PR list. Auth is cookie-based against the API; no separate BFF.
 
@@ -92,6 +92,12 @@ npx smee-client --url <your-smee-url> --target http://localhost:8000/webhook/git
 OAuth callback should match `GITHUB_OAUTH_CALLBACK_URL` (default `http://localhost:8000/auth/github/callback`). App Setup URL: `http://localhost:3000/install/complete`.
 
 ---
+
+## Live Preview(TraceGraph Dashboard)
+# Architecture
+
+![TraceGraph Demo1](././docs/demo_ui/demo1.png)
+![TraceGraph Demo2](././docs/demo_ui/demo2.png)
 
 # Future Improvements
 
