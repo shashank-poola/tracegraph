@@ -104,9 +104,3 @@ OAuth callback should match `GITHUB_OAUTH_CALLBACK_URL` (default `http://localho
 - Structured crawl auth without putting passwords in agent prompts
 - Shared auth context on the frontend (fewer duplicate `/auth/me` calls)
 - Split `storage.py` by domain once the schema stabilizes
-
----
-
-# Contributing
-
-Keep changes small and explainable. Prefer deleting dead paths over adding flags. If a founder asks “why does this exist?”, the answer should be obvious from the code or this README.

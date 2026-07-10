@@ -12,16 +12,6 @@ Where this document and the code disagree, **the code wins**.
 
 We did not invent the final diagram on day one. The system grew in three clear steps.
 
-### v0 — Code graph only
-
-```
-GitHub tarball → Python AST → Neo4j
-```
-
-**Goal:** Answer “what calls what.”  
-**What worked:** Real structure from the compiler (`ast`), not an LLM guessing the call graph.  
-**What failed the product test:** No screens, no requirements, no PR story. A QA lead still had to guess what a diff meant for users.
-
 ### v1 — Three layers + dashboard
 
 ```

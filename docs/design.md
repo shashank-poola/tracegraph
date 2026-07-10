@@ -1,6 +1,6 @@
-# TraceGraph — Design Document (Part B)
+# TraceGraph - Design Document (Part B)
 
-A testing-intelligence system that crawls a live app, ingests a product spec, builds a three-layer knowledge graph (**Requirements / UI / Code**), and reasons about the blast radius of a real Pull Request — then posts a comment a non-engineer QA lead can actually read.
+A testing-intelligence system that crawls a live app, ingests a product spec, builds a three-layer knowledge graph (**Requirements / UI / Code**), and reasons about the blast radius of a real Pull Request - then posts a comment a non-engineer QA lead can actually read.
 
 **Read this alongside the code.** Where the code and this document disagree, the code wins and I treat the gap as a bug in the document. I have tried hard not to describe anything as “built” that isn’t. Sections that describe intended design are labelled **PLANNED — not built**.
 
@@ -29,7 +29,7 @@ TraceGraph is **two processes** plus a small set of external systems:
 
 ![TraceGraph system architecture](./architecture.png)
 
-*Figure 1 — End-to-end architecture: Next.js + GitHub webhook into FastAPI; three prep lanes (Knowledge Graph → Neo4j, Ingest → parse docs, Live Crawl → browser-use); artifacts converge in SQLite; on PR, load SQLite + diff → LLM blast radius → TraceGraph comment on the PR.*
+*Figure 1 - End-to-end architecture: Next.js + GitHub webhook into FastAPI; three prep lanes (Knowledge Graph → Neo4j, Ingest → parse docs, Live Crawl → browser-use); artifacts converge in SQLite; on PR, load SQLite + diff → LLM blast radius → TraceGraph comment on the PR.*
 
 The same shape as a Mermaid sketch (for readers who prefer text diagrams):
 
