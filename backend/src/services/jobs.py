@@ -1,9 +1,16 @@
-"""Job store + async pipelines. In-memory poll + SQLite persistence on completion."""
+"""Job store + async pipelines.
+
+Live progress lives in memory for fast polling. Job metadata is also written to
+SQLite so completed work can be listed later. Polling a job after process restart
+returns 404 — that is intentional for the local/dev model.
+"""
 
 from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Awaitable, Callable
+
 from src.config import get_settings
 from src.models.schemas import (
     CrawlRequest,
@@ -11,7 +18,6 @@ from src.models.schemas import (
     IngestRequest,
     JobState,
     JobStatus,
-    RepoTree,
     ScreenInfo,
 )
 from src.services import storage as db
@@ -25,6 +31,8 @@ from src.services.ingest import ingest_doc
 from src.services.pr_review import MARK_BEGIN, RepoContext, render_comment, review_pr
 
 logger = logging.getLogger("jobs")
+
+ProgressFn = Callable[[float, str], Awaitable[None]]
 
 
 class JobStore:
@@ -52,7 +60,43 @@ class JobStore:
 store = JobStore()
 
 
-async def run_job(
+def create_job(kind: str, full_name: str | None = None) -> JobStatus:
+    row = db.create_job(kind, full_name=full_name)
+    status = JobStatus(job_id=row["job_id"], state=JobState.pending, message="queued")
+    store.put(status)
+    return status
+
+
+def create_analyze_job(full_name: str | None = None) -> JobStatus:
+    return create_job("analyze", full_name)
+
+
+def create_crawl_job(full_name: str | None = None) -> JobStatus:
+    return create_job("crawl", full_name)
+
+
+def create_ingest_job(full_name: str | None = None) -> JobStatus:
+    return create_job("ingest", full_name)
+
+
+def _bind_progress(status: JobStatus, job_id: str) -> ProgressFn:
+    async def progress(value: float, message: str) -> None:
+        status.state = JobState.running
+        status.progress = round(min(max(value, 0.0), 1.0), 3)
+        status.message = message
+        db.update_job(job_id, progress=status.progress, message=message, state="running")
+
+    return progress
+
+
+def _fail(status: JobStatus, job_id: str, exc: BaseException) -> None:
+    status.state = JobState.error
+    status.error = str(exc) or type(exc).__name__
+    status.message = "failed"
+    db.update_job(job_id, state="error", error=status.error, message="failed")
+
+
+async def run_analyze_job(
     job_id: str,
     token: str,
     full_name: str,
@@ -64,14 +108,9 @@ async def run_job(
     if not status:
         return
 
-    async def progress(value: float, message: str) -> None:
-        status.progress = round(min(max(value, 0.0), 1.0), 3)
-        status.message = message
-        db.update_job(job_id, progress=status.progress, message=message, state="running")
-
+    progress = _bind_progress(status, job_id)
     try:
-        db.update_job(job_id, state="running", message="Fetching repository")
-        status.state = JobState.running
+        await progress(0.05, "Fetching repository")
         fetched = await download_tarball(token, full_name, ref)
         del token
 
@@ -97,10 +136,11 @@ async def run_job(
         db.update_job(job_id, state="done", progress=1.0, message=status.message)
     except Exception as exc:  # noqa: BLE001
         logger.exception("analyze job failed: %s", exc)
-        status.state = JobState.error
-        status.error = str(exc)
-        status.message = "failed"
-        db.update_job(job_id, state="error", error=str(exc), message="failed")
+        _fail(status, job_id, exc)
+
+
+# Backwards-compatible alias used by older imports / tests
+run_job = run_analyze_job
 
 
 async def run_crawl_job(job_id: str, req: CrawlRequest, user_id: str = "") -> None:
@@ -108,16 +148,11 @@ async def run_crawl_job(job_id: str, req: CrawlRequest, user_id: str = "") -> No
     if not status:
         return
 
-    async def progress(value: float, message: str) -> None:
-        status.progress = round(min(max(value, 0.0), 1.0), 3)
-        status.message = message
-        db.update_job(job_id, progress=status.progress, message=message)
-
+    progress = _bind_progress(status, job_id)
     captured: list[ScreenInfo] = []
 
     async def on_screen(screen: ScreenInfo) -> None:
-        # Surface each screen the moment it's captured so a client polling
-        # this job can render a live, growing feed instead of one final result.
+        # Surface each screen as it is captured so polling clients can render a live feed.
         captured.append(screen)
         status.crawl_result = CrawlResult(
             run_id=job_id,
@@ -127,10 +162,22 @@ async def run_crawl_job(job_id: str, req: CrawlRequest, user_id: str = "") -> No
         )
 
     try:
-        status.state = JobState.running
-        db.update_job(job_id, state="running")
+        await progress(0.02, "Starting crawl")
         result = await crawl_app(req, progress, on_screen)
         status.crawl_result = result
+        if result.screen_count == 0 and result.capture_note:
+            status.state = JobState.error
+            status.error = result.capture_note
+            status.progress = 1.0
+            status.message = "crawl failed"
+            db.update_job(
+                job_id,
+                state="error",
+                error=result.capture_note,
+                message="crawl failed",
+                progress=1.0,
+            )
+            return
         status.state = JobState.done
         status.progress = 1.0
         status.message = f"crawled {result.screen_count} screens"
@@ -141,9 +188,7 @@ async def run_crawl_job(job_id: str, req: CrawlRequest, user_id: str = "") -> No
         db.update_job(job_id, state="done", progress=1.0, message=status.message)
     except Exception as exc:  # noqa: BLE001
         logger.exception("crawl failed: %s", exc)
-        status.state = JobState.error
-        status.error = str(exc) or type(exc).__name__
-        db.update_job(job_id, state="error", error=status.error)
+        _fail(status, job_id, exc)
 
 
 async def run_ingest_job(job_id: str, req: IngestRequest, user_id: str = "") -> None:
@@ -151,16 +196,9 @@ async def run_ingest_job(job_id: str, req: IngestRequest, user_id: str = "") -> 
     if not status:
         return
 
-    async def progress(value: float, message: str) -> None:
-        status.progress = round(min(max(value, 0.0), 1.0), 3)
-        status.message = message
-        db.update_job(job_id, progress=status.progress, message=message)
-
+    progress = _bind_progress(status, job_id)
     try:
-        status.state = JobState.running
-        status.progress = 0.02
-        status.message = "Fetch documentation"
-        db.update_job(job_id, state="running", progress=0.02, message=status.message)
+        await progress(0.02, "Fetch documentation")
         result = await ingest_doc(req, progress)
         status.ingest_result = result
         status.state = JobState.done
@@ -173,15 +211,14 @@ async def run_ingest_job(job_id: str, req: IngestRequest, user_id: str = "") -> 
         db.update_job(job_id, state="done", progress=1.0, message=status.message)
     except Exception as exc:  # noqa: BLE001
         logger.exception("ingest failed: %s", exc)
-        status.state = JobState.error
-        status.error = str(exc)
-        db.update_job(job_id, state="error", error=str(exc))
+        _fail(status, job_id, exc)
 
 
 async def run_reason_job(full_name: str, pr_number: int, ctx: RepoContext | None = None) -> None:
     try:
         if ctx is None:
-            ctx = RepoContext.from_storage(full_name)
+            # Webhooks have no session user — load the newest artifacts for this repo.
+            ctx = RepoContext.from_storage(full_name, user_id="")
         token = await installation_token(full_name)
         pr = await fetch_pr_context(token, full_name, pr_number)
         verdict, tree = await review_pr(token, pr, ctx)
@@ -205,24 +242,3 @@ async def run_reason_job(full_name: str, pr_number: int, ctx: RepoContext | None
         logger.info("reason done %s#%d verdict=%s url=%s", full_name, pr_number, verdict.verdict, url)
     except Exception as exc:  # noqa: BLE001
         logger.exception("reason failed %s#%d: %s", full_name, pr_number, exc)
-
-
-def create_analyze_job(full_name: str | None = None) -> JobStatus:
-    row = db.create_job("analyze", full_name=full_name)
-    status = JobStatus(job_id=row["job_id"], state=JobState.pending, message="queued")
-    store.put(status)
-    return status
-
-
-def create_crawl_job(full_name: str | None = None) -> JobStatus:
-    row = db.create_job("crawl", full_name=full_name)
-    status = JobStatus(job_id=row["job_id"], state=JobState.pending, message="queued")
-    store.put(status)
-    return status
-
-
-def create_ingest_job(full_name: str | None = None) -> JobStatus:
-    row = db.create_job("ingest", full_name=full_name)
-    status = JobStatus(job_id=row["job_id"], state=JobState.pending, message="queued")
-    store.put(status)
-    return status

@@ -14,9 +14,10 @@ const GRAPH_STEPS: Step[] = [
 ];
 
 const CRAWL_STEPS: Step[] = [
-  { label: "Discover screens", at: 0.2 },
-  { label: "Attach screenshots", at: 0.55 },
-  { label: "Label screens", at: 0.85 },
+  { label: "Start browser-use session", at: 0.05 },
+  { label: "Capture routes", at: 0.15 },
+  { label: "Capture sidebar views", at: 0.5 },
+  { label: "Save screenshots", at: 0.9 },
 ];
 
 const INGEST_STEPS: Step[] = [
@@ -72,7 +73,9 @@ export function PipelineProgress({
               ? "bg-red-500"
               : kind === "graph"
                 ? "progress-gradient animate-shimmer"
-                : "progress-gradient-ingest animate-shimmer",
+                : kind === "crawl"
+                  ? "progress-gradient-crawl animate-shimmer"
+                  : "progress-gradient-ingest animate-shimmer",
           )}
           style={{ width: `${Math.max(pct, isError ? 100 : 3)}%` }}
         />

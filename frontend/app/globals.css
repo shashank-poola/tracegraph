@@ -97,3 +97,12 @@ h3 {
     var(--accent-cyan)
   );
 }
+
+.progress-gradient-crawl {
+  background: linear-gradient(
+    90deg,
+    var(--accent-cyan),
+    var(--accent-emerald),
+    var(--accent-amber)
+  );
+}

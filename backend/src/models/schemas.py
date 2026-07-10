@@ -10,8 +10,6 @@ from pydantic import BaseModel, Field
 
 class AnalyzeRequest(BaseModel):
     full_name: str = Field(..., description="owner/repo")
-    owner: str
-    repo: str
     ref: str = ""
     token: str = Field(default="", repr=False, description="optional if session cookie/Bearer set")
     build_graph: bool = True
@@ -88,13 +86,15 @@ class GraphRequest(BaseModel):
 
 
 class LoginConfig(BaseModel):
+    """Credentials for authenticated crawl routes.
+
+    Selectors are unused — browser-use logs in from the task prompt.
+    Kept only as optional hints for future structured auth.
+    """
+
     login_url: str
     username: str = Field(..., repr=False)
     password: str = Field(..., repr=False)
-    username_selector: str = "input[type=email], input[name=username], #user-name"
-    password_selector: str = "input[type=password], #password"
-    submit_selector: str = "button[type=submit], #login-button"
-    logged_out_marker: str = "/login"
 
 
 class RouteSpec(BaseModel):
@@ -107,10 +107,6 @@ class CrawlRequest(BaseModel):
     full_name: str = Field(default="", description="owner/repo — links crawl to SQLite + graph")
     routes: list[RouteSpec] = Field(default_factory=list)
     login: LoginConfig | None = None
-    # hybrid = browser-use discovers screens + cloud screenshots (default)
-    # agent = same as hybrid
-    # playwright = legacy alias for explicit routes only (no local browser)
-    crawl_mode: str = Field(default="hybrid", description="hybrid | agent | playwright")
 
 
 class InteractiveElement(BaseModel):
@@ -214,7 +210,6 @@ class JobCreated(BaseModel):
 class ReasonRequest(BaseModel):
     full_name: str
     pr_number: int
-    installation_id: int | None = None
     # Optional overrides; backend loads from SQLite when omitted.
     tree: dict[str, Any] | None = None
     crawl: dict[str, Any] | None = None

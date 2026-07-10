@@ -1,10 +1,8 @@
-"""LLM client: GLM → Groq GPT-OSS → Gemini fallback."""
+"""LLM client: GLM → Groq → Gemini fallback."""
 
 from __future__ import annotations
 
-import json
 import logging
-import re
 from typing import Any
 
 import httpx
@@ -12,8 +10,6 @@ import httpx
 from src.config import get_settings
 
 logger = logging.getLogger(__name__)
-
-_JSON_FENCE = re.compile(r"```(?:json)?\s*(.+?)\s*```", re.DOTALL)
 
 
 async def complete(
@@ -55,18 +51,6 @@ async def complete(
             errors.append(f"gemini: {exc}")
 
     raise RuntimeError("; ".join(errors) if errors else "no LLM provider configured")
-
-
-async def complete_json(messages: list[dict[str, str]], **kwargs: Any) -> Any:
-    raw = await complete(messages, json_mode=True, **kwargs)
-    text = raw.strip()
-    if m := _JSON_FENCE.search(text):
-        text = m.group(1).strip()
-    elif not text.startswith("{"):
-        start, end = text.find("{"), text.rfind("}")
-        if start != -1:
-            text = text[start : end + 1]
-    return json.loads(text)
 
 
 async def _gemini(messages: list[dict[str, str]], temperature: float, json_mode: bool) -> str:

@@ -136,9 +136,9 @@ export type JobStatus = {
   progress: number;
   message: string;
   error: string | null;
-  result?: unknown;
-  crawl_result?: CrawlResult;
-  ingest_result?: unknown;
+  result?: RepoTree | null;
+  crawl_result?: CrawlResult | null;
+  ingest_result?: IngestResult | null;
 };
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -223,11 +223,15 @@ export function listRepos(): Promise<{ repos: Repo[]; tracked_count: number }> {
   return api("/repos");
 }
 
-export function trackRepo(fullName: string): Promise<unknown> {
+export function trackRepo(
+  fullName: string,
+): Promise<{ status: string; full_name: string }> {
   return api(`/repos/${fullName}/track`, { method: "POST" });
 }
 
-export function untrackRepo(fullName: string): Promise<unknown> {
+export function untrackRepo(
+  fullName: string,
+): Promise<{ status: string; full_name: string }> {
   return api(`/repos/${fullName}/track`, { method: "DELETE" });
 }
 
@@ -262,8 +266,6 @@ export function getRepoPull(
 
 export function startAnalyze(params: {
   full_name: string;
-  owner: string;
-  repo: string;
   ref?: string;
   build_graph?: boolean;
 }): Promise<{ job_id: string; state: JobState }> {
@@ -282,26 +284,52 @@ export function startCrawl(params: {
   base_url: string;
   full_name?: string;
   routes?: { path: string; authenticated: boolean }[];
-  crawl_mode?: string;
 }): Promise<{ job_id: string; state: JobState }> {
   return api("/crawl", { method: "POST", body: JSON.stringify(params) });
 }
 
 export function getJobStatus(jobId: string): Promise<JobStatus> {
-  return api(`/analyze/${jobId}`);
+  return api(`/jobs/${jobId}`);
 }
 
 export async function pollJob(
   jobId: string,
   onUpdate: (status: JobStatus) => void,
-  { intervalMs = 1500 }: { intervalMs?: number } = {},
+  {
+    intervalMs = 1500,
+    signal,
+  }: { intervalMs?: number; signal?: AbortSignal } = {},
 ): Promise<JobStatus> {
   while (true) {
+    if (signal?.aborted) {
+      throw new DOMException("Polling aborted", "AbortError");
+    }
     const status = await getJobStatus(jobId);
     onUpdate(status);
     if (status.state === "done" || status.state === "error") {
       return status;
     }
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, intervalMs);
+      signal?.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(timer);
+          reject(new DOMException("Polling aborted", "AbortError"));
+        },
+        { once: true },
+      );
+    });
   }
+}
+
+/** After OAuth or App install, send the user to install or dashboard. */
+export async function resolvePostAuthPath(
+  installationId?: number,
+): Promise<"/login" | "/install" | "/dashboard"> {
+  const user = await getCurrentUser();
+  if (!user) return "/login";
+  const status = await getInstallationStatus(installationId);
+  if (status.required && !status.installed) return "/install";
+  return "/dashboard";
 }

@@ -2,25 +2,17 @@
 
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { getCurrentUser, getInstallationStatus } from "@/lib/api";
+import { resolvePostAuthPath } from "@/lib/api";
 
 export default function AuthCallbackPage() {
   const router = useRouter();
 
   useEffect(() => {
-    getCurrentUser().then((user) => {
-      if (!user) {
-        router.replace("/login?error=oauth_failed");
-        return;
-      }
-      getInstallationStatus().then((status) => {
-        if (status.required && !status.installed) {
-          router.replace("/install");
-          return;
-        }
-        router.replace("/dashboard");
-      });
-    });
+    resolvePostAuthPath()
+      .then((path) => {
+        router.replace(path === "/login" ? "/login?error=oauth_failed" : path);
+      })
+      .catch(() => router.replace("/login?error=oauth_failed"));
   }, [router]);
 
   return (

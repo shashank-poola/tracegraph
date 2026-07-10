@@ -30,9 +30,9 @@ from src.services.jobs import (
     create_analyze_job,
     create_crawl_job,
     create_ingest_job,
+    run_analyze_job,
     run_crawl_job,
     run_ingest_job,
-    run_job,
     run_reason_job,
     store,
 )
@@ -65,13 +65,15 @@ async def analyze(
     user_id = (user or {}).get("id", "")
     status = create_analyze_job(req.full_name)
     asyncio.create_task(
-        run_job(status.job_id, token, req.full_name, req.ref, req.build_graph, user_id)
+        run_analyze_job(status.job_id, token, req.full_name, req.ref, req.build_graph, user_id)
     )
     return JobCreated(job_id=status.job_id, state=status.state)
 
 
+@router.get("/jobs/{job_id}", response_model=JobStatus)
 @router.get("/analyze/{job_id}", response_model=JobStatus)
-async def get_status(job_id: str) -> JobStatus:
+async def get_job_status(job_id: str) -> JobStatus:
+    """Poll any job (analyze, crawl, or ingest). ``/analyze/{id}`` kept for compatibility."""
     status = store.get(job_id)
     if not status:
         raise HTTPException(404, "job not found or expired")
@@ -140,11 +142,14 @@ async def reason(
 async def github_webhook(request: Request) -> dict[str, str]:
     settings = get_settings()
     if not settings.github_webhook_secret:
+        logger.warning("webhook rejected: GITHUB_WEBHOOK_SECRET not configured")
         raise HTTPException(503, "webhook not configured")
     raw = await request.body()
     if not _verify_signature(settings.github_webhook_secret, raw, request.headers.get("X-Hub-Signature-256")):
+        logger.warning("webhook rejected: invalid signature")
         raise HTTPException(401, "invalid signature")
     event = request.headers.get("X-GitHub-Event", "")
+    logger.info("webhook received event=%s bytes=%d", event, len(raw))
     if event == "ping":
         return {"status": "pong"}
     payload = json.loads(raw)
@@ -152,11 +157,14 @@ async def github_webhook(request: Request) -> dict[str, str]:
         record_installation_webhook(payload.get("installation") or {}, action=payload.get("action", ""))
         return {"status": "ok", "event": event, "action": payload.get("action", "")}
     if event != "pull_request":
+        logger.info("webhook ignored event=%s", event)
         return {"status": "ignored", "event": event}
     action = payload.get("action", "")
     if action not in {"opened", "reopened", "synchronize", "ready_for_review"}:
+        logger.info("webhook ignored pull_request action=%s", action)
         return {"status": "ignored", "action": action}
     full_name = payload["repository"]["full_name"]
     number = payload["pull_request"]["number"]
+    logger.info("webhook accepted pull_request %s#%s action=%s", full_name, number, action)
     asyncio.create_task(run_reason_job(full_name, number))
     return {"status": "accepted", "repo": full_name, "pr": str(number)}

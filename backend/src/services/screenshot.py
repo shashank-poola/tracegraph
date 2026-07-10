@@ -7,20 +7,27 @@ import base64
 import httpx
 
 
-async def store_screenshot(path: str, data: bytes, content_type: str = "image/png") -> str:
+def to_data_uri(data: bytes, content_type: str = "image/png") -> str:
     b64 = base64.b64encode(data).decode("ascii")
     return f"data:{content_type};base64,{b64}"
 
 
-async def persist_screenshot_url(url: str) -> str:
-    """Download a cloud screenshot URL and return a data: URI for SQLite storage."""
+async def download_presigned_screenshot(url: str | None) -> str:
+    """Download a browser-use presigned screenshot URL into a data: URI.
+
+    Presigned URLs expire in ~5 minutes. Returns an empty string on failure.
+    """
     if not url:
         return ""
     if url.startswith("data:"):
         return url
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
-        resp = await client.get(url, headers={"User-Agent": "tracegraph"})
-        resp.raise_for_status()
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+            resp = await client.get(url)
+        if resp.status_code != 200:
+            return ""
         content_type = resp.headers.get("content-type", "image/png").split(";")[0]
-        return await store_screenshot(url, resp.content, content_type)
+        return to_data_uri(resp.content, content_type)
+    except Exception:  # noqa: BLE001
+        return ""

@@ -281,11 +281,27 @@ def save_repo_tree(
 
 
 def get_repo_tree(full_name: str, *, user_id: str = "") -> dict[str, Any] | None:
+    """Load a saved AST tree.
+
+    When ``user_id`` is empty (webhook / system callers), return the most recently
+    updated tree for the repo across all users so PR reviews still see dashboard data.
+    """
     with _connect() as conn:
-        row = conn.execute(
-            "SELECT tree_json FROM repo_trees WHERE user_id = ? AND full_name = ?",
-            (user_id, full_name),
-        ).fetchone()
+        if user_id:
+            row = conn.execute(
+                "SELECT tree_json FROM repo_trees WHERE user_id = ? AND full_name = ?",
+                (user_id, full_name),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
+                SELECT tree_json FROM repo_trees
+                WHERE full_name = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (full_name,),
+            ).fetchone()
     return json.loads(row["tree_json"]) if row else None
 
 
@@ -319,10 +335,21 @@ def save_crawl_result(
 
 def get_crawl_result(full_name: str, *, user_id: str = "") -> dict[str, Any] | None:
     with _connect() as conn:
-        row = conn.execute(
-            "SELECT result_json FROM crawl_results WHERE user_id = ? AND full_name = ?",
-            (user_id, full_name),
-        ).fetchone()
+        if user_id:
+            row = conn.execute(
+                "SELECT result_json FROM crawl_results WHERE user_id = ? AND full_name = ?",
+                (user_id, full_name),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
+                SELECT result_json FROM crawl_results
+                WHERE full_name = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (full_name,),
+            ).fetchone()
     return json.loads(row["result_json"]) if row else None
 
 
@@ -359,10 +386,21 @@ def save_ingest_result(
 
 def get_ingest_result(full_name: str, *, user_id: str = "") -> dict[str, Any] | None:
     with _connect() as conn:
-        row = conn.execute(
-            "SELECT result_json FROM ingest_results WHERE user_id = ? AND full_name = ?",
-            (user_id, full_name),
-        ).fetchone()
+        if user_id:
+            row = conn.execute(
+                "SELECT result_json FROM ingest_results WHERE user_id = ? AND full_name = ?",
+                (user_id, full_name),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
+                SELECT result_json FROM ingest_results
+                WHERE full_name = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (full_name,),
+            ).fetchone()
     return json.loads(row["result_json"]) if row else None
 
 
@@ -702,12 +740,18 @@ def delete_github_installation(installation_id: int) -> None:
         )
 
 
-def has_github_installation_for_app(_app_id: int) -> bool:
+def has_any_github_installation() -> bool:
+    """True if at least one GitHub App installation is recorded locally."""
     with _connect() as conn:
         row = conn.execute(
             "SELECT installation_id FROM github_installations LIMIT 1"
         ).fetchone()
     return row is not None
+
+
+# Backwards-compatible alias — the app id was never used for filtering.
+def has_github_installation_for_app(_app_id: int) -> bool:
+    return has_any_github_installation()
 
 
 def has_github_installation_for_login(login: str) -> bool:

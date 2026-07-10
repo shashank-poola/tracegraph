@@ -1,17 +1,69 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { ArrowLeftRight, Compass, ImageOff, Search } from "lucide-react";
+import { ArrowLeftRight, ChevronRight, Compass, Search } from "lucide-react";
 import { Modal } from "@/components/ui/modal";
+import { Thumbnail } from "@/components/dashboard/crawl-live-feed";
 import { cn } from "@/lib/utils";
 import type { CrawlResult, ScreenInfo } from "@/lib/api";
 
+function ScreenFlowStrip({
+  screens,
+  selectedId,
+  onSelect,
+}: {
+  screens: ScreenInfo[];
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+}) {
+  if (screens.length === 0) return null;
+
+  return (
+    <div className="border-b border-border px-6 py-4">
+      <p className="mb-3 text-[11px] font-medium uppercase tracking-wider text-muted">
+        Screen flow
+      </p>
+      <div className="flex items-center gap-2 overflow-x-auto pb-1">
+        {screens.map((screen, index) => (
+          <div key={screen.screen_id} className="flex shrink-0 items-center gap-2">
+            <button
+              type="button"
+              onClick={() => onSelect(screen.screen_id)}
+              className={cn(
+                "flex w-28 flex-col overflow-hidden rounded-lg border transition-colors",
+                selectedId === screen.screen_id
+                  ? "border-cyan-400/50 bg-cyan-400/[0.06]"
+                  : "border-border bg-white/[0.02] hover:border-zinc-600",
+              )}
+            >
+              <Thumbnail
+                src={screen.screenshot_url}
+                className="h-16 w-full object-cover object-top"
+              />
+              <div className="border-t border-border px-2 py-1.5 text-left">
+                <p className="truncate text-[10px] font-medium text-foreground">
+                  {screen.label || screen.title || `Screen ${index + 1}`}
+                </p>
+              </div>
+            </button>
+            {index < screens.length - 1 && (
+              <ChevronRight className="h-4 w-4 shrink-0 text-muted" strokeWidth={1.5} />
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function ScreenRow({
   screen,
+  index,
   active,
   onSelect,
 }: {
   screen: ScreenInfo;
+  index: number;
   active: boolean;
   onSelect: () => void;
 }) {
@@ -24,18 +76,13 @@ function ScreenRow({
         active && "bg-white/[0.05]",
       )}
     >
-      <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-md border border-border bg-white/[0.02]">
-        {screen.screenshot_url ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={screen.screenshot_url}
-            alt=""
-            className="h-full w-full object-cover object-top"
-          />
-        ) : (
-          <ImageOff className="h-3.5 w-3.5 text-muted" strokeWidth={1.5} />
-        )}
-      </div>
+      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-border text-[10px] text-muted">
+        {index + 1}
+      </span>
+      <Thumbnail
+        src={screen.screenshot_url}
+        className="h-10 w-10 shrink-0 rounded-md border border-border object-cover object-top"
+      />
       <div className="min-w-0 flex-1">
         <p className="truncate text-xs text-foreground">
           {screen.label || screen.title || screen.url}
@@ -67,14 +114,10 @@ function ScreenDetail({
   return (
     <div className="flex flex-col gap-4 p-4">
       <div className="overflow-hidden rounded-lg border border-border bg-white/[0.02]">
-        {screen.screenshot_url ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={screen.screenshot_url} alt="" className="w-full object-cover" />
-        ) : (
-          <div className="flex h-40 items-center justify-center text-xs text-muted">
-            No screenshot captured
-          </div>
-        )}
+        <Thumbnail
+          src={screen.screenshot_url}
+          className="min-h-52 w-full object-cover object-top"
+        />
       </div>
 
       <div>
@@ -82,7 +125,7 @@ function ScreenDetail({
           {screen.label || screen.title || screen.url}
         </p>
         {screen.purpose && (
-          <p className="mt-1 text-xs leading-5 text-muted">{screen.purpose}</p>
+          <p className="mt-1 text-xs leading-6 text-muted">{screen.purpose}</p>
         )}
       </div>
 
@@ -179,6 +222,7 @@ export function CrawlModal({
     const s = screens.find((sc) => sc.screen_id === id);
     return s ? s.label || s.title || s.url : id;
   };
+  const sameUrl = screens.length > 1 && new Set(screens.map((s) => s.url)).size === 1;
 
   if (!result) return null;
 
@@ -188,11 +232,11 @@ export function CrawlModal({
       onClose={onClose}
       title={`Screen graph · ${fullName}`}
       icon={<Compass className="h-4 w-4 text-foreground" strokeWidth={1.5} />}
-      subtitle="Screens crawled from the live application and the transitions inferred between them. Select a screen to inspect its captured response."
+      subtitle="Screens captured from the live app and how users move between them. Select a screen to inspect its screenshot and browser-use response."
       className="max-w-6xl"
     >
       <div className="flex flex-wrap gap-2 border-b border-border px-6 py-3">
-        <span className="rounded-full border border-border px-2.5 py-0.5 text-xs text-foreground">
+        <span className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2.5 py-0.5 text-xs text-cyan-100">
           {result.screen_count.toLocaleString()} screens
         </span>
         <span className="rounded-full border border-border px-2.5 py-0.5 text-xs text-foreground">
@@ -209,7 +253,20 @@ export function CrawlModal({
         </div>
       )}
 
-      <div className="grid min-h-[420px] md:grid-cols-2">
+      {sameUrl && (
+        <div className="border-b border-border bg-white/[0.02] px-6 py-3 text-xs leading-5 text-muted">
+          This app uses one URL for multiple sidebar views. TraceGraph captured each sidebar
+          screen as a separate node even though the address bar stays the same.
+        </div>
+      )}
+
+      <ScreenFlowStrip
+        screens={screens}
+        selectedId={selected?.screen_id ?? null}
+        onSelect={setSelectedId}
+      />
+
+      <div className="grid min-h-[420px] md:grid-cols-[minmax(0,280px)_1fr]">
         <div className="flex flex-col border-b border-border md:border-b-0 md:border-r">
           <div className="relative border-b border-border px-4 py-3">
             <Search className="pointer-events-none absolute left-7 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
@@ -221,10 +278,11 @@ export function CrawlModal({
             />
           </div>
           <div className="flex-1 overflow-y-auto">
-            {filtered.map((screen) => (
+            {filtered.map((screen, index) => (
               <ScreenRow
                 key={screen.screen_id}
                 screen={screen}
+                index={screens.indexOf(screen)}
                 active={selected?.screen_id === screen.screen_id}
                 onSelect={() => setSelectedId(screen.screen_id)}
               />

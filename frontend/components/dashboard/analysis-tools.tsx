@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChevronRight, Database, FileText, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { PipelineProgress } from "@/components/dashboard/pipeline-progress";
@@ -18,6 +18,10 @@ import {
   startIngest,
 } from "@/lib/api";
 
+function isAbortError(err: unknown): boolean {
+  return err instanceof DOMException && err.name === "AbortError";
+}
+
 export function AnalysisTools({
   repo,
   onAnalyzed,
@@ -34,6 +38,12 @@ export function AnalysisTools({
   const [ingestRunning, setIngestRunning] = useState(false);
   const [ingestResult, setIngestResult] = useState<IngestResult | null>(null);
   const [ingestOpen, setIngestOpen] = useState(false);
+
+  const pollAbort = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    return () => pollAbort.current?.abort();
+  }, []);
 
   useEffect(() => {
     if (repo.status.has_graph) {
@@ -55,6 +65,13 @@ export function AnalysisTools({
     }
   }, [repo.full_name, repo.status.has_requirements]);
 
+  function startPoll(): AbortSignal {
+    pollAbort.current?.abort();
+    const controller = new AbortController();
+    pollAbort.current = controller;
+    return controller.signal;
+  }
+
   async function openGraphDetails() {
     if (graphTree) {
       setGraphOpen(true);
@@ -65,7 +82,7 @@ export function AnalysisTools({
       setGraphTree(tree);
       setGraphOpen(true);
     } catch {
-      // no-op
+      // Cached tree unavailable — user can regenerate.
     }
   }
 
@@ -79,32 +96,30 @@ export function AnalysisTools({
       setIngestResult(result);
       setIngestOpen(true);
     } catch {
-      // no-op
+      // Cached ingest unavailable — user can re-run.
     }
   }
 
   async function handleGenerateGraph() {
     setGraphRunning(true);
     setGraphJob(null);
+    const signal = startPoll();
     try {
-      const [owner, name] = repo.full_name.split("/");
       const { job_id } = await startAnalyze({
         full_name: repo.full_name,
-        owner,
-        repo: name,
         ref: repo.default_branch,
         build_graph: true,
       });
-      const final = await pollJob(job_id, setGraphJob);
+      const final = await pollJob(job_id, setGraphJob, { signal });
       if (final.state === "done") {
-        const tree = (final.result ?? null) as RepoTree | null;
-        if (tree) {
-          setGraphTree(tree);
+        if (final.result) {
+          setGraphTree(final.result);
           setGraphOpen(true);
         }
         onAnalyzed();
       }
     } catch (err) {
+      if (isAbortError(err)) return;
       setGraphJob({
         job_id: "",
         state: "error",
@@ -120,22 +135,23 @@ export function AnalysisTools({
   async function handleIngest() {
     setIngestRunning(true);
     setIngestJob(null);
+    const signal = startPoll();
     try {
       const { job_id } = await startIngest({
         source: repo.full_name,
         source_type: "github_repo",
         full_name: repo.full_name,
       });
-      const final = await pollJob(job_id, setIngestJob);
+      const final = await pollJob(job_id, setIngestJob, { signal });
       if (final.state === "done") {
-        const result = (final.ingest_result ?? null) as IngestResult | null;
-        if (result) {
-          setIngestResult(result);
+        if (final.ingest_result) {
+          setIngestResult(final.ingest_result);
           setIngestOpen(true);
         }
         onAnalyzed();
       }
     } catch (err) {
+      if (isAbortError(err)) return;
       setIngestJob({
         job_id: "",
         state: "error",

@@ -25,15 +25,10 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("GITHUB_OAUTH_CLIENT_SECRET", "GITHUB_APP_CLIENT_SECRET"),
     )
     github_oauth_callback_url: str = "http://localhost:8000/auth/github/callback"
-    server_jwt_secret: str = Field(
-        default="",
-        repr=False,
-        validation_alias=AliasChoices("SERVER_JWT_SECRET", "JWT_SECRET"),
-    )
     session_ttl_seconds: int = 60 * 60 * 24 * 7
     oauth_cookie_secure: bool = False
 
-    # LLM chain: GLM 5.2 → Groq GPT-OSS → Gemini
+    # LLM chain: GLM → Groq → Gemini
     zai_api_key: str = Field(default="", repr=False)
     zai_model: str = "glm-5.2"
     zai_base_url: str = "https://api.z.ai/api/paas/v4"
@@ -63,15 +58,9 @@ class Settings(BaseSettings):
     github_app_private_key: str = Field(default="", repr=False)
     github_webhook_secret: str = Field(default="", repr=False)
 
-    # Crawl artifacts + browser-use cloud agent
+    # Crawl (browser-use cloud)
     crawl_artifact_dir: str = "artifacts"
-    crawl_headless: bool = True
     crawl_max_screens: int = 40
-    crawl_nav_timeout_ms: int = 20_000
-    crawl_llm_labeling: bool = True
-    crawl_max_dom_bytes: int = 400_000
-
-    # browser-use cloud agent (autonomous discovery + cloud screenshots)
     browser_use_api_key: str = Field(default="", repr=False)
     crawl_browseruse_concurrency: int = 3
     crawl_agent_max_cost_usd: float = 2.0

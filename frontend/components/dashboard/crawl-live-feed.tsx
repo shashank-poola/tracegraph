@@ -1,8 +1,42 @@
 "use client";
 
+import { useState } from "react";
 import { ImageOff, Radar } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ScreenInfo } from "@/lib/api";
+
+export function Thumbnail({
+  src,
+  className,
+}: {
+  src?: string;
+  className?: string;
+}) {
+  const [failed, setFailed] = useState(false);
+
+  if (!src || failed) {
+    return (
+      <div
+        className={cn(
+          "flex items-center justify-center bg-white/[0.02] text-muted",
+          className,
+        )}
+      >
+        <ImageOff className="h-3.5 w-3.5" strokeWidth={1.5} />
+      </div>
+    );
+  }
+
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={src}
+      alt=""
+      className={className}
+      onError={() => setFailed(true)}
+    />
+  );
+}
 
 /** Live-updating feed of screens as they're captured, for use while a crawl job is running. */
 export function CrawlLiveFeed({
@@ -29,7 +63,7 @@ export function CrawlLiveFeed({
         const isLatest = i === screens.length - 1;
         return (
           <div
-            key={screen.screen_id}
+            key={`${screen.screen_id}-${i}`}
             className={cn(
               "flex items-center gap-3 rounded-lg border px-3 py-2 transition-colors",
               isLatest
@@ -37,18 +71,10 @@ export function CrawlLiveFeed({
                 : "border-border bg-white/[0.02]",
             )}
           >
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-md border border-border bg-white/[0.02]">
-              {screen.screenshot_url ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={screen.screenshot_url}
-                  alt=""
-                  className="h-full w-full object-cover object-top"
-                />
-              ) : (
-                <ImageOff className="h-3.5 w-3.5 text-muted" strokeWidth={1.5} />
-              )}
-            </div>
+            <Thumbnail
+              src={screen.screenshot_url}
+              className="h-10 w-10 shrink-0 rounded-md border border-border object-cover object-top"
+            />
             <div className="min-w-0 flex-1">
               <p className="truncate text-xs text-foreground">
                 {screen.label || screen.title || screen.url}
@@ -64,6 +90,31 @@ export function CrawlLiveFeed({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+export function CrawlHeroScreenshot({
+  src,
+  title,
+  subtitle,
+}: {
+  src?: string;
+  title: string;
+  subtitle?: string;
+}) {
+  return (
+    <div className="overflow-hidden rounded-lg border border-border bg-white/[0.02]">
+      <Thumbnail
+        src={src}
+        className="h-44 w-full object-cover object-top"
+      />
+      <div className="border-t border-border px-3 py-2.5">
+        <p className="truncate text-xs font-medium text-foreground">{title}</p>
+        {subtitle && (
+          <p className="mt-0.5 truncate text-[11px] text-muted">{subtitle}</p>
+        )}
+      </div>
     </div>
   );
 }

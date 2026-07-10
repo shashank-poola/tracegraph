@@ -2,7 +2,7 @@
 
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { getCurrentUser, getInstallationStatus } from "@/lib/api";
+import { resolvePostAuthPath } from "@/lib/api";
 
 export default function InstallCompletePage() {
   const router = useRouter();
@@ -15,19 +15,9 @@ export default function InstallCompletePage() {
         ? Number(installationId)
         : undefined;
 
-    getCurrentUser().then((user) => {
-      if (!user) {
-        router.replace("/login");
-        return;
-      }
-      getInstallationStatus(parsedId).then((status) => {
-        if (status.required && !status.installed) {
-          router.replace("/install");
-          return;
-        }
-        router.replace("/dashboard");
-      });
-    });
+    resolvePostAuthPath(parsedId)
+      .then((path) => router.replace(path))
+      .catch(() => router.replace("/login"));
   }, [router]);
 
   return (

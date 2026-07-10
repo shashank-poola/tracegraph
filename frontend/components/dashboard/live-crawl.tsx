@@ -1,11 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChevronRight, Compass, Lock, Plus, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { PipelineProgress } from "@/components/dashboard/pipeline-progress";
-import { CrawlLiveFeed } from "@/components/dashboard/crawl-live-feed";
+import { CrawlHeroScreenshot, CrawlLiveFeed } from "@/components/dashboard/crawl-live-feed";
 import { CrawlModal } from "@/components/dashboard/crawl-modal";
 import {
   type CrawlResult,
@@ -16,7 +16,11 @@ import {
   startCrawl,
 } from "@/lib/api";
 
-type Route = { path: string; authenticated: boolean };
+type CrawlRoute = { path: string; authenticated: boolean };
+
+function isAbortError(err: unknown): boolean {
+  return err instanceof DOMException && err.name === "AbortError";
+}
 
 export function LiveCrawl({
   repo,
@@ -26,11 +30,16 @@ export function LiveCrawl({
   onCrawled: () => void;
 }) {
   const [baseUrl, setBaseUrl] = useState("");
-  const [routes, setRoutes] = useState<Route[]>([{ path: "/", authenticated: false }]);
+  const [routes, setRoutes] = useState<CrawlRoute[]>([{ path: "/", authenticated: false }]);
   const [job, setJob] = useState<JobStatus | null>(null);
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<CrawlResult | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
+  const pollAbort = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    return () => pollAbort.current?.abort();
+  }, []);
 
   useEffect(() => {
     if (repo.status.has_crawl) {
@@ -51,11 +60,11 @@ export function LiveCrawl({
       setResult(await getRepoCrawl(repo.full_name));
       setModalOpen(true);
     } catch {
-      // no-op
+      // Cached crawl unavailable — user can re-run.
     }
   }
 
-  function updateRoute(index: number, patch: Partial<Route>) {
+  function updateRoute(index: number, patch: Partial<CrawlRoute>) {
     setRoutes((prev) => prev.map((r, i) => (i === index ? { ...r, ...patch } : r)));
   }
 
@@ -67,22 +76,27 @@ export function LiveCrawl({
     if (!baseUrl.trim()) return;
     setRunning(true);
     setJob(null);
+    pollAbort.current?.abort();
+    const controller = new AbortController();
+    pollAbort.current = controller;
     try {
       const { job_id } = await startCrawl({
         base_url: baseUrl.trim(),
         full_name: repo.full_name,
         routes: routes.filter((r) => r.path.trim()),
-        crawl_mode: "hybrid",
       });
-      const final = await pollJob(job_id, setJob);
+      const final = await pollJob(job_id, setJob, { signal: controller.signal });
       if (final.state === "done") {
         if (final.crawl_result) {
           setResult(final.crawl_result);
-          setModalOpen(true);
+          if (final.crawl_result.screen_count > 0) {
+            setModalOpen(true);
+          }
         }
         onCrawled();
       }
     } catch (err) {
+      if (isAbortError(err)) return;
       setJob({
         job_id: "",
         state: "error",
@@ -97,6 +111,8 @@ export function LiveCrawl({
 
   const isRunning = job && job.state !== "done" && job.state !== "error";
   const liveScreens = job?.crawl_result?.screens ?? [];
+  const heroScreen =
+    result?.screens.find((screen) => screen.screenshot_url) ?? result?.screens[0];
 
   return (
     <div className="rounded-xl border border-border p-5">
@@ -107,9 +123,9 @@ export function LiveCrawl({
         </h3>
       </div>
       <p className="mt-1 text-xs leading-5 text-muted">
-        List the routes to capture and mark each public or authenticated. A
-        browser-use agent explores the app, captures cloud screenshots, and maps
-        how the screens connect.
+        List routes to capture. For Streamlit apps with sidebar navigation, only add
+        <code className="mx-1 rounded bg-white/5 px-1">/</code> — TraceGraph will
+        auto-capture each sidebar view (Home, Add expense, etc.).
       </p>
 
       <div className="mt-4 grid gap-4 sm:grid-cols-2">
@@ -183,24 +199,45 @@ export function LiveCrawl({
               </p>
               <CrawlLiveFeed screens={liveScreens} statusMessage={job.message} />
             </>
+          ) : result?.capture_note && result.screen_count === 0 ? (
+            <div className="flex flex-1 flex-col justify-center gap-2 rounded-lg border border-amber-500/20 bg-amber-500/5 px-4 py-3 text-sm text-amber-200/90">
+              <p className="font-medium text-amber-100">Crawl could not capture any screens</p>
+              <p className="text-xs leading-5">{result.capture_note}</p>
+            </div>
           ) : result ? (
             <button
               type="button"
               onClick={openDetails}
-              className="flex flex-1 items-center justify-between gap-3 rounded-lg border border-border px-3 py-2.5 text-left transition-colors hover:bg-white/[0.03]"
+              className="flex flex-1 flex-col gap-3 text-left transition-opacity hover:opacity-95"
             >
-              <div className="flex flex-col gap-0.5">
-                <span className="text-xs text-foreground">
-                  Crawled {result.screen_count.toLocaleString()}{" "}
-                  {result.screen_count === 1 ? "screen" : "screens"} ·{" "}
-                  {result.transitions.length.toLocaleString()} transitions
-                </span>
-                <span className="text-[11px] text-muted">Saved to DB</span>
+              <div className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-wider text-muted">
+                <Compass className="h-3.5 w-3.5" strokeWidth={1.5} />
+                Crawled {result.screen_count}{" "}
+                {result.screen_count === 1 ? "screen" : "screens"}
               </div>
-              <span className="flex shrink-0 items-center gap-0.5 text-xs text-muted">
-                View screen graph & browser responses{" "}
-                <ChevronRight className="h-3.5 w-3.5" />
-              </span>
+
+              <CrawlHeroScreenshot
+                src={heroScreen?.screenshot_url}
+                title={heroScreen?.label || heroScreen?.title || "Captured screen"}
+                subtitle={
+                  heroScreen?.interactive_count != null
+                    ? `${heroScreen.interactive_count} controls`
+                    : result.base_url
+                }
+              />
+
+              <div className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2.5">
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-xs text-foreground">
+                    {result.transitions.length.toLocaleString()} transitions
+                  </span>
+                  <span className="text-[11px] text-muted">Saved to DB</span>
+                </div>
+                <span className="flex shrink-0 items-center gap-0.5 text-xs text-muted">
+                  View screen graph & browser responses{" "}
+                  <ChevronRight className="h-3.5 w-3.5" />
+                </span>
+              </div>
             </button>
           ) : (
             <p className="flex h-full items-center justify-center text-center text-xs text-muted">
