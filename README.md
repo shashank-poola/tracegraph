@@ -20,21 +20,7 @@ Trade-off we accepted: the system is strongest when you have run all three pipel
 
 # Architecture
 
-```
-┌─────────────┐     cookie session      ┌──────────────────┐
-│  Next.js UI │ ───────────────────────▶│  FastAPI backend │
-└─────────────┘                         └────────┬─────────┘
-                                                 │
-        ┌──────────────┬─────────────────────────┼────────────────┐
-        ▼              ▼                         ▼                ▼
-   Analyze job    Crawl job                 Ingest job     GitHub webhook
-   (AST+LLM)      (browser-use)             (docs→reqs)    (PR opened/sync)
-        │              │                         │                │
-        └──────────────┴──────────┬──────────────┘                │
-                                  ▼                               ▼
-                           SQLite artifacts              PR blast-radius
-                           (+ Neo4j graph)               comment via App
-```
+![TraceGraph architecture](./architecture.png)
 
 **Frontend** — dashboard, job progress, screen graph, PR list. Auth is cookie-based against the API; no separate BFF.
 
